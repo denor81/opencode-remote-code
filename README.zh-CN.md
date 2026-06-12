@@ -28,6 +28,21 @@
 
 ---
 
+## 🔌 独立 MCP Server
+
+当前仓库是 **OpenCode 插件版**：
+<https://github.com/zz6zz666/opencode-remote-code>
+
+同一 GitHub 账号下也会有独立 MCP server 版本：
+<https://github.com/zz6zz666/mcp-remote-code>
+
+两个项目有相同的零侵入 SSH 动机，但面向不同工作流：
+
+- **OpenCode 插件版**：深度绑定 OpenCode。它覆盖原生工具，把远端机器完全伪装成 agent workspace。运行时环境完全在远端，本地目录不会自然进入 agent 的普通视野。
+- **MCP server 版**：向任意 MCP 客户端暴露带命名空间的 `remote_*` 工具。本地和远端工作可以并存，agent 可以在本地维护设计笔记或查找表，同时在 SSH 目标上执行远端命令、编辑、patch、pull、push 和仿真任务。
+
+---
+
 ## 📋 前置要求
 
 - **OpenCode**（最新版本）

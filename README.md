@@ -28,6 +28,29 @@ I need to use OpenCode on my local Windows host to control that VM — automatin
 
 ---
 
+## 🔌 Standalone MCP Server
+
+This repository is the **OpenCode plugin** version:
+<https://github.com/zz6zz666/opencode-remote-code>
+
+There is also a standalone MCP server version planned for the same GitHub
+account:
+<https://github.com/zz6zz666/mcp-remote-code>
+
+The two projects share the same zero-footprint SSH motivation, but target
+different workflows:
+
+- **OpenCode plugin**: tightly integrated with OpenCode. It overrides native
+  tools so the remote machine is fully masqueraded as the agent workspace. The
+  runtime environment is remote, and local directories are intentionally not
+  part of the agent's normal view.
+- **MCP server**: exposes namespaced `remote_*` tools to any MCP client. Local
+  and remote work can coexist, so an agent can keep local design notes or lookup
+  tables while running remote commands, edits, patches, pulls, pushes, and
+  simulations on the SSH target.
+
+---
+
 ## 📋 Prerequisites
 
 - **OpenCode** (latest version)

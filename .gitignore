@@ -9,6 +9,7 @@ dist/
 # Temporary / reference files
 tmp_*
 temp_*
+mcp-remote-code/
 
 # Logs
 *.log
