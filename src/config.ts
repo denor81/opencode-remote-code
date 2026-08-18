@@ -1,159 +1,121 @@
-import os from "os"
-import path from "path"
+import path from "node:path"
+import { computeTargetID } from "./runtime-paths.js"
+
+export const REMOTE_ENV = {
+  alias: "OPENCODE_SSH_ALIAS",
+  workdir: "OPENCODE_SSH_WORKDIR",
+  socket: "OPENCODE_SSH_SOCKET",
+  targetID: "OPENCODE_SSH_TARGET_ID",
+  launchID: "OPENCODE_SSH_LAUNCH_ID",
+  readyPath: "OPENCODE_SSH_READY_PATH",
+  readyNonce: "OPENCODE_SSH_READY_NONCE",
+  runtimeDir: "OPENCODE_SSH_RUNTIME_DIR",
+  mirrorRoot: "OPENCODE_SSH_MIRROR_ROOT",
+  sshBinary: "OPENCODE_SSH_SSH_BIN",
+  sftpBinary: "OPENCODE_SSH_SFTP_BIN",
+} as const
 
 export interface RemoteConfig {
-  /** Raw SSH command string, e.g. "ssh -oHostKeyAlgorithms=+ssh-rsa root@host" */
-  sshCommand: string
-  /** Parsed SSH target host */
-  host: string
-  /** Parsed SSH user */
-  user: string
-  /** Parsed SSH port */
-  port: number
-  /** Parsed identity file (optional) */
-  identity?: string
-  /** Extra SSH -o options */
-  extraOptions: string[]
-  /** SSH login password (optional, uses sshpass) */
-  password?: string
-  /** Sudo password for remote commands (optional) */
-  sudoPassword?: string
-  /** Remote working directory (absolute path on remote) */
+  alias: string
   remoteWorkdir: string
-  /** Local mirror root directory */
+  controlSocket: string
+  targetID: string
+  launchID: string
+  readyPath: string
+  readyNonce: string
+  runtimeDir: string
   mirrorRoot: string
-  /** Whether remote mode is active */
-  active: boolean
+  sshBinary: string
+  sftpBinary: string
+  active: true
 }
 
-function parseArgv(): Record<string, string | undefined> {
-  const args: Record<string, string | undefined> = {}
-  const argv = process.argv
-  for (let i = 2; i < argv.length; i++) {
-    const arg = argv[i]
-    if (arg.startsWith("--")) {
-      const key = arg
-      const next = argv[i + 1]
-      if (next && !next.startsWith("-")) {
-        args[key] = next
-        i++
-      } else {
-        args[key] = "true"
-      }
-    }
+const REQUIRED_FIELDS = [
+  REMOTE_ENV.alias,
+  REMOTE_ENV.workdir,
+  REMOTE_ENV.socket,
+  REMOTE_ENV.targetID,
+  REMOTE_ENV.launchID,
+  REMOTE_ENV.readyPath,
+  REMOTE_ENV.readyNonce,
+  REMOTE_ENV.runtimeDir,
+  REMOTE_ENV.mirrorRoot,
+] as const
+
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/
+
+/** Load only the plugin instance injected by the matching launcher process. */
+export function loadConfig(
+  options?: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env
+): RemoteConfig | null {
+  const launchID = env[REMOTE_ENV.launchID]
+  const optionLaunchID = options?.launchID
+
+  if (!launchID) return null
+  if (optionLaunchID !== launchID) return null
+
+  const missing = REQUIRED_FIELDS.filter((name) => !env[name])
+  if (missing.length > 0) {
+    throw new Error(`OpenCode SSH launcher context is incomplete: missing ${missing.join(", ")}`)
   }
-  return args
-}
 
-function parseSshCommand(cmd: string): {
-  host: string
-  user: string
-  port: number
-  identity?: string
-  extraOptions: string[]
-} {
-  const tokens = cmd.trim().split(/\s+/)
-  if (tokens.length === 0 || tokens[0] !== "ssh") {
-    throw new Error(`Remote Code: --remote must start with "ssh", got: ${cmd}`)
+  const alias = env[REMOTE_ENV.alias]!
+  const remoteWorkdir = env[REMOTE_ENV.workdir]!
+  const controlSocket = env[REMOTE_ENV.socket]!
+  const targetID = env[REMOTE_ENV.targetID]!
+  const readyPath = env[REMOTE_ENV.readyPath]!
+  const readyNonce = env[REMOTE_ENV.readyNonce]!
+  const runtimeDir = env[REMOTE_ENV.runtimeDir]!
+  const mirrorRoot = env[REMOTE_ENV.mirrorRoot]!
+
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(alias) || CONTROL_CHARACTERS.test(alias)) {
+    throw new Error("OpenCode SSH launcher supplied an invalid SSH alias")
   }
-
-  let host = ""
-  let user = ""
-  let port = 22
-  let identity: string | undefined
-  const extraOptions: string[] = []
-
-  for (let i = 1; i < tokens.length; i++) {
-    const tok = tokens[i]
-    if (tok === "-p" || tok === "--port") {
-      port = parseInt(tokens[++i], 10)
-      if (isNaN(port)) throw new Error(`Remote Code: invalid port in --remote`)
-    } else if (tok === "-i") {
-      identity = tokens[++i]
-    } else if (tok.startsWith("-o")) {
-      // Handle both `-oKey=Value` and `-o Key=Value`
-      if (tok === "-o") {
-        extraOptions.push("-o", tokens[++i])
-      } else {
-        extraOptions.push("-o", tok.slice(2))
-      }
-    } else if (tok.startsWith("-")) {
-      // Other flags we don't explicitly parse; if they take args, skip next token heuristically
-      // This is best-effort; users with exotic flags should rely on -o
-      if (i + 1 < tokens.length && !tokens[i + 1].startsWith("-")) {
-        i++
-      }
-    } else if (tok.includes("@")) {
-      const at = tok.lastIndexOf("@")
-      user = tok.slice(0, at)
-      host = tok.slice(at + 1)
-    } else {
-      host = tok
+  if (!path.posix.isAbsolute(remoteWorkdir) || CONTROL_CHARACTERS.test(remoteWorkdir)) {
+    throw new Error("OpenCode SSH launcher supplied an invalid remote workdir")
+  }
+  for (const [name, value] of [
+    ["control socket", controlSocket],
+    ["ready path", readyPath],
+    ["runtime directory", runtimeDir],
+    ["mirror root", mirrorRoot],
+  ] as const) {
+    if (!path.isAbsolute(value) || CONTROL_CHARACTERS.test(value)) {
+      throw new Error(`OpenCode SSH launcher supplied an invalid ${name}`)
     }
   }
 
-  if (!host) {
-    throw new Error(`Remote Code: could not parse host from --remote: ${cmd}`)
+  const resolvedRuntime = path.resolve(runtimeDir)
+  const resolvedSocket = path.resolve(controlSocket)
+  if (
+    resolvedSocket !== resolvedRuntime &&
+    !resolvedSocket.startsWith(`${resolvedRuntime}${path.sep}`)
+  ) {
+    throw new Error("OpenCode SSH control socket is outside its private runtime directory")
   }
-  if (!user) {
-    user = "root"
+  if (!/^[a-f0-9]{64}$/.test(targetID)) {
+    throw new Error("OpenCode SSH launcher supplied an invalid target ID")
   }
-
-  return { host, user, port, identity, extraOptions }
-}
-
-export function loadConfig(options?: Record<string, unknown>): RemoteConfig | null {
-  const args = parseArgv()
-
-  // Remote mode activation: MUST come from CLI args or env vars.
-  // Plugin options alone do NOT activate remote mode.
-  const hasCliRemote = Boolean(args["--remote"] || args["--remote-ssh"])
-  const hasEnvRemote = Boolean(process.env.REMOTE_SSH)
-
-  if (!hasCliRemote && !hasEnvRemote) {
-    return null
+  if (computeTargetID(alias, remoteWorkdir) !== targetID) {
+    throw new Error("OpenCode SSH target ID does not match the alias and workdir")
   }
-
-  // Priority: CLI args > env vars > plugin options (fallback only)
-  const opt = (key: string): string | undefined => {
-    const legacyKey = key === "ssh" ? "--remote" : `--remote-${key}`
-    const cliKey = `--remote-${key}`
-    if (args[legacyKey]) return args[legacyKey]
-    if (args[cliKey]) return args[cliKey]
-    const envKey = key === "ssh" ? "REMOTE_SSH" : `REMOTE_${key.toUpperCase()}`
-    const envValue = process.env[envKey]
-    if (envValue) return envValue
-    // Fallback to plugin options for supplementary config only
-    if (options && typeof options[key] === "string") return options[key] as string
-    return undefined
+  if (readyNonce.length < 32 || CONTROL_CHARACTERS.test(readyNonce)) {
+    throw new Error("OpenCode SSH launcher supplied an invalid ready nonce")
   }
-
-  const sshCommand = opt("ssh")
-  if (!sshCommand) {
-    return null
-  }
-
-  const remoteWorkdir = opt("workdir")
-  if (!remoteWorkdir) {
-    throw new Error(
-      `Remote Code: remote SSH is configured but remote-workdir is missing. Provide it via --remote-workdir, plugin options, or REMOTE_WORKDIR env var.`
-    )
-  }
-
-  const parsed = parseSshCommand(sshCommand)
-  const mirrorRoot =
-    opt("mirror") ?? path.join(os.homedir(), ".opencode", "mirrors")
-
-  const password = opt("password")
-  const sudoPassword = opt("sudo-password")
 
   return {
-    sshCommand,
-    ...parsed,
-    password,
-    sudoPassword,
+    alias,
     remoteWorkdir,
+    controlSocket,
+    targetID,
+    launchID,
+    readyPath,
+    readyNonce,
+    runtimeDir,
     mirrorRoot,
+    sshBinary: env[REMOTE_ENV.sshBinary] || "ssh",
+    sftpBinary: env[REMOTE_ENV.sftpBinary] || "sftp",
     active: true,
   }
 }

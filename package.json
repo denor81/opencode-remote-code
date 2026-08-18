@@ -1,46 +1,69 @@
 {
-  "name": "opencode-remote-code",
+  "name": "opencode-ssh",
   "version": "0.1.0",
-  "description": "OpenCode plugin for remote machine control over SSH",
+  "description": "Run OpenCode locally while project tools operate through system OpenSSH; tested against OpenCode 1.18.18",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
     "./server": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
   },
+  "bin": {
+    "opencode-ssh": "dist/cli.js"
+  },
   "files": [
-    "dist"
+    "dist",
+    "docs/installation-and-usage.md",
+    "docs/upstream-fit-checklist.md",
+    "docs/upstream-fit-report.md",
+    "opencode-ssh-remote-use/opencode-ssh-safety.md",
+    "LICENSE",
+    "README.md",
+    "README.zh-CN.md",
+    "SECURITY.md",
+    "UPSTREAM.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/clean.cjs && tsc -p tsconfig.json",
     "postbuild": "node scripts/postbuild.cjs",
+    "prepack": "npm run build",
     "dev": "tsc --watch",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "npm run build && vitest run test/unit test/integration test/smoke",
+    "test:unit": "vitest run test/unit",
+    "test:integration": "npm run build && vitest run test/integration",
+    "test:smoke": "npm run build && vitest run test/smoke",
+    "test:real": "npm run build && vitest run test/real"
   },
-  "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.15.0"
+  "engines": {
+    "node": ">=22.22.2"
   },
   "dependencies": {
-    "diff": "^9.0.0",
-    "ssh2": "^1.17.0"
+    "@opencode-ai/plugin": "1.18.18",
+    "diff": "9.0.0",
+    "effect": "4.0.0-beta.83",
+    "jsonc-parser": "3.3.1"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/ssh2": "^1.15.5",
-    "typescript": "^5.4.0",
-    "zod": "^3.22.0"
+    "@types/node": "22.17.1",
+    "typescript": "5.9.2",
+    "vitest": "3.2.7"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/zz6zz666/opencode-remote-code.git"
+    "url": "https://github.com/denor81/opencode-remote-code.git"
   },
   "bugs": {
-    "url": "https://github.com/zz6zz666/opencode-remote-code/issues"
+    "url": "https://github.com/denor81/opencode-remote-code/issues"
   },
-  "homepage": "https://github.com/zz6zz666/opencode-remote-code#readme",
+  "homepage": "https://github.com/denor81/opencode-remote-code#readme",
   "license": "MIT",
   "keywords": [
     "opencode",
@@ -48,8 +71,5 @@
     "ssh",
     "remote",
     "agent"
-  ],
-  "dependencies": {
-    "ssh2": "^1.17.0"
-  }
+  ]
 }

@@ -1,9 +1,24 @@
-import { tool } from "@opencode-ai/plugin"
+import { StringDecoder } from "node:string_decoder"
+import {
+  tool,
+  type ToolContext,
+  type ToolDefinition,
+} from "@opencode-ai/plugin"
+import { publishToolMetadata } from "../opencode-metadata.js"
+import type { RemotePathResolver } from "../remote-path-resolver.js"
 import type { SSHPool } from "../ssh-pool.js"
+import { SshClientError } from "../ssh/client.js"
 
-export function createBashTool(sshPool: SSHPool, defaultWorkdir: string) {
+const MAX_METADATA_LENGTH = 30_000
+const METADATA_UPDATE_INTERVAL_MS = 100
+
+export function createBashTool(
+  sshPool: SSHPool,
+  defaultWorkdir: string,
+  pathResolver: RemotePathResolver
+): ToolDefinition {
   return tool({
-    description: `Execute commands in a bash shell on the remote machine.`,
+    description: `Execute commands in a one-shot POSIX shell on the remote machine.`,
     args: {
       command: tool.schema.string().describe("The bash command to execute"),
       description: tool.schema.string().describe("A short description of what the command does"),
@@ -15,10 +30,100 @@ export function createBashTool(sshPool: SSHPool, defaultWorkdir: string) {
       if (timeout < 0) {
         throw new Error("Timeout must be a non-negative number")
       }
-      const result = await sshPool.exec(args.command, {
-        cwd: args.workdir ?? defaultWorkdir,
-        timeout,
+      const workdir = await pathResolver.resolveExisting(
+        args.workdir ?? defaultWorkdir,
+        ctx
+      )
+      await ctx.ask({
+        permission: "bash",
+        patterns: [args.command],
+        always: [args.command],
+        metadata: {
+          description: args.description,
+          executor: "ssh",
+          workdir,
+        },
       })
+      const title = args.description || "bash"
+      const stdoutDecoder = new StringDecoder("utf8")
+      const stderrDecoder = new StringDecoder("utf8")
+      const publisher = new MetadataPublisher(ctx)
+      let preview = ""
+      let previewWasCut = false
+      let decodersFinished = false
+      const appendPreview = (text: string) => {
+        preview += text
+        if (preview.length > MAX_METADATA_LENGTH) {
+          preview = "...\n\n" + preview.slice(-MAX_METADATA_LENGTH)
+          previewWasCut = true
+        }
+      }
+      const runningUpdate = (): MetadataUpdate => ({
+        title,
+        metadata: {
+          output: preview,
+          description: args.description,
+          executor: "ssh",
+          workdir,
+          truncated: previewWasCut,
+          remoteOutputTruncated: previewWasCut,
+        },
+      })
+      const finishPreview = () => {
+        if (decodersFinished) return
+        decodersFinished = true
+        appendPreview(stdoutDecoder.end())
+        appendPreview(stderrDecoder.end())
+      }
+      const settlementMetadata = (result?: {
+        exitCode: number | null
+        stderr: string
+        stdoutTruncated: boolean
+        stderrTruncated: boolean
+      }) => {
+        const stderr = result === undefined ? "" : filterSshNoise(result.stderr || "")
+        const remoteOutputTruncated =
+          previewWasCut ||
+          (result?.stdoutTruncated ?? false) ||
+          (result?.stderrTruncated ?? false)
+        return {
+          output: preview || "(no output)",
+          ...(result?.exitCode != null ? { exit: result.exitCode } : {}),
+          description: args.description,
+          stderr: stderr || undefined,
+          executor: "ssh",
+          workdir,
+          truncated: remoteOutputTruncated,
+          remoteOutputTruncated,
+        }
+      }
+
+      await publisher.publishInitial(runningUpdate())
+      let result
+      try {
+        result = await sshPool.exec(args.command, {
+          cwd: workdir,
+          timeout,
+          signal: ctx.abort,
+          onStdout: (chunk) => {
+            appendPreview(stdoutDecoder.write(chunk))
+            publisher.notify(runningUpdate())
+          },
+          onStderr: (chunk) => {
+            appendPreview(stderrDecoder.write(chunk))
+            publisher.notify(runningUpdate())
+          },
+        })
+      } catch (error) {
+        finishPreview()
+        const errorResult =
+          error instanceof SshClientError ? error.result : undefined
+        await publisher.settle({
+          title,
+          metadata: settlementMetadata(errorResult),
+        })
+        throw error
+      }
 
       let stdout = result.stdout || ""
       let stderr = result.stderr || ""
@@ -26,20 +131,11 @@ export function createBashTool(sshPool: SSHPool, defaultWorkdir: string) {
       // Filter out SSH connection noise from stderr
       stderr = filterSshNoise(stderr)
 
-      // CentOS 6 / OpenSSH 5.3 does not reliably propagate exit codes through
-      // the SSH exec channel. Fall back to stderr heuristics when exitCode is 0
-      // but stderr indicates a clear failure.
-      const stderrErrors = [
-        "command not found",
-        "no such file or directory",
-        "permission denied",
-        "sorry, you must have a tty to run sudo",
-      ]
-      const hasStderrError = stderrErrors.some((e) =>
-        stderr.toLowerCase().includes(e)
-      )
+      finishPreview()
+      const finalMetadata = settlementMetadata(result)
+      await publisher.settle({ title, metadata: finalMetadata })
 
-      if (result.exitCode !== 0 || hasStderrError) {
+      if (result.exitCode !== 0) {
         const parts: string[] = []
         if (stdout.trim()) parts.push(stdout)
         if (stderr.trim()) parts.push(`stderr:\n${stderr}`)
@@ -56,18 +152,100 @@ export function createBashTool(sshPool: SSHPool, defaultWorkdir: string) {
       if (!output.trim()) {
         output = "(no output)"
       }
+      if (result.stdoutTruncated || result.stderrTruncated) {
+        output += "\n\n(Output truncated by opencode-ssh.)"
+      }
 
       return {
-        title: args.description || "bash",
+        title,
         output,
-        metadata: {
-          exit: result.exitCode,
-          description: args.description,
-          stderr: stderr || undefined,
-        },
+        metadata: finalMetadata,
       }
     },
   })
+}
+
+type MetadataUpdate = Parameters<ToolContext["metadata"]>[0]
+
+class MetadataPublisher {
+  private enabled = true
+  private accepting = true
+  private pending: MetadataUpdate | undefined
+  private worker: Promise<void> | undefined
+  private lastSuccessAt: number | undefined
+
+  constructor(private readonly context: Pick<ToolContext, "metadata">) {}
+
+  async publishInitial(update: MetadataUpdate): Promise<void> {
+    try {
+      await publishToolMetadata(this.context, update)
+      this.lastSuccessAt = Date.now()
+    } catch {
+      this.disable()
+    }
+  }
+
+  notify(update: MetadataUpdate): void {
+    if (!this.enabled || !this.accepting) return
+    this.pending = update
+    this.startWorker()
+  }
+
+  async settle(update: MetadataUpdate): Promise<void> {
+    this.accepting = false
+    if (this.enabled) {
+      this.pending = update
+      this.startWorker()
+    }
+    while (
+      this.worker !== undefined ||
+      (this.enabled && this.pending !== undefined)
+    ) {
+      this.startWorker()
+      const worker = this.worker
+      if (worker === undefined) break
+      await worker
+    }
+  }
+
+  private startWorker(): void {
+    if (!this.enabled || this.worker !== undefined || this.pending === undefined) return
+    const worker = this.runWorker().finally(() => {
+      if (this.worker === worker) {
+        this.worker = undefined
+        this.startWorker()
+      }
+    })
+    this.worker = worker
+  }
+
+  private async runWorker(): Promise<void> {
+    while (this.enabled && this.pending !== undefined) {
+      if (this.lastSuccessAt !== undefined) {
+        const wait =
+          METADATA_UPDATE_INTERVAL_MS - (Date.now() - this.lastSuccessAt)
+        if (wait > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, wait))
+        }
+      }
+      if (!this.enabled || this.pending === undefined) return
+
+      const update = this.pending
+      this.pending = undefined
+      try {
+        await publishToolMetadata(this.context, update)
+        this.lastSuccessAt = Date.now()
+      } catch {
+        this.disable()
+      }
+    }
+  }
+
+  private disable(): void {
+    this.enabled = false
+    this.accepting = false
+    this.pending = undefined
+  }
 }
 
 const SSH_NOISE_PATTERNS = [

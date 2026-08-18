@@ -1,7 +1,10 @@
 import fs from "fs/promises"
 import path from "path"
-import { tool } from "@opencode-ai/plugin"
+import { tool, type ToolDefinition } from "@opencode-ai/plugin"
 import type { PathMapper } from "../path-mapper.js"
+import type { RemotePathResolver } from "../remote-path-resolver.js"
+import { remotePermissionPattern } from "../remote-path.js"
+import { quoteShell } from "../shell-quote.js"
 import type { SSHPool } from "../ssh-pool.js"
 import type { SyncEngine } from "../sync-engine.js"
 
@@ -27,7 +30,8 @@ function isBinaryByExtension(filePath: string): boolean {
 
 async function checkRemoteBinary(
   sshPool: SSHPool,
-  remotePath: string
+  remotePath: string,
+  signal: AbortSignal
 ): Promise<{ isBinary: boolean; reason?: string }> {
   // 1. Extension blacklist
   if (isBinaryByExtension(remotePath)) {
@@ -37,7 +41,7 @@ async function checkRemoteBinary(
   // 2. Remote file command check
   const fileResult = await sshPool.exec(
     `file -b ${quoteShell(remotePath)} 2>/dev/null || echo "UNKNOWN"`,
-    { timeout: 10_000 }
+    { timeout: 10_000, signal }
   )
   const fileDesc = fileResult.stdout.trim().toLowerCase()
   if (fileDesc !== "unknown" && !fileDesc.includes("text") && !fileDesc.includes("empty")) {
@@ -47,7 +51,7 @@ async function checkRemoteBinary(
   // 3. Remote null-byte check in first 4KB (fallback when file cmd unavailable or ambiguous)
   const nullCheck = await sshPool.exec(
     `dd bs=4096 count=1 if=${quoteShell(remotePath)} 2>/dev/null | od -An -tx1 | grep -q ' 00 ' && echo HAS_NULL || echo NO_NULL`,
-    { timeout: 10_000 }
+    { timeout: 10_000, signal }
   )
   if (nullCheck.stdout.trim() === "HAS_NULL") {
     return { isBinary: true, reason: "null bytes detected" }
@@ -56,7 +60,12 @@ async function checkRemoteBinary(
   return { isBinary: false }
 }
 
-export function createReadTool(pathMapper: PathMapper, syncEngine: SyncEngine, sshPool: SSHPool) {
+export function createReadTool(
+  pathMapper: PathMapper,
+  syncEngine: SyncEngine,
+  sshPool: SSHPool,
+  pathResolver: RemotePathResolver
+): ToolDefinition {
   return tool({
     description: `Read the contents of a file or list a directory on the remote machine.`,
     args: {
@@ -65,18 +74,14 @@ export function createReadTool(pathMapper: PathMapper, syncEngine: SyncEngine, s
       limit: tool.schema.number().optional().describe("The maximum number of lines to read (defaults to 2000)"),
     },
     async execute(args, ctx) {
-      let remotePath = path.posix.normalize(args.filePath)
-      if (!path.posix.isAbsolute(remotePath)) {
-        remotePath = path.posix.join(pathMapper.remoteRoot, remotePath)
-      }
-      if (!pathMapper.isWithinWorkspace(remotePath)) {
-        await ctx.ask({
-          permission: "read",
-          patterns: [remotePath],
-          always: [remotePath],
-          metadata: {},
-        })
-      }
+      const remotePath = await pathResolver.resolveExisting(args.filePath, ctx)
+      const permissionPattern = remotePermissionPattern(pathMapper.remoteRoot, remotePath)
+      await ctx.ask({
+        permission: "read",
+        patterns: [permissionPattern],
+        always: [permissionPattern],
+        metadata: { executor: "ssh", remotePath },
+      })
 
       const localPath = pathMapper.toLocal(remotePath)
       const limit = args.limit ?? DEFAULT_LIMIT
@@ -85,15 +90,21 @@ export function createReadTool(pathMapper: PathMapper, syncEngine: SyncEngine, s
       // Determine remote type (file / directory / missing)
       const typeResult = await sshPool.exec(
         `if [ -d ${quoteShell(remotePath)} ]; then echo "DIR"; elif [ -f ${quoteShell(remotePath)} ]; then echo "FILE"; else echo "MISSING"; fi`,
-        { timeout: 10_000 }
+        { timeout: 10_000, signal: ctx.abort }
       )
+      if (typeResult.exitCode !== 0) {
+        throw new Error(`Failed to inspect remote path ${remotePath}: ${typeResult.stderr}`)
+      }
       const remoteType = typeResult.stdout.trim()
 
       if (remoteType === "DIR") {
         const result = await sshPool.exec(
           `ls -1pA ${quoteShell(remotePath)}`,
-          { timeout: 15_000 }
+          { timeout: 15_000, signal: ctx.abort }
         )
+        if (result.exitCode !== 0) {
+          throw new Error(`Failed to list remote directory ${remotePath}: ${result.stderr}`)
+        }
         const items = result.stdout
           .split("\n")
           .map((l) => l.trim())
@@ -125,7 +136,10 @@ export function createReadTool(pathMapper: PathMapper, syncEngine: SyncEngine, s
         const base = path.posix.basename(remotePath).toLowerCase()
         let suggestions: string[] = []
         try {
-          const result = await sshPool.exec(`ls -1A ${quoteShell(remoteDir)}`, { timeout: 10_000 })
+          const result = await sshPool.exec(`ls -1A ${quoteShell(remoteDir)}`, {
+            timeout: 10_000,
+            signal: ctx.abort,
+          })
           const items = result.stdout.split("\n").map((l) => l.trim()).filter(Boolean)
           suggestions = items
             .filter((i) => i.toLowerCase().includes(base) || base.includes(i.toLowerCase()))
@@ -140,79 +154,77 @@ export function createReadTool(pathMapper: PathMapper, syncEngine: SyncEngine, s
       }
 
       // For files: check binary on remote BEFORE syncing
-      const binaryCheck = await checkRemoteBinary(sshPool, remotePath)
+      const binaryCheck = await checkRemoteBinary(sshPool, remotePath, ctx.abort)
       if (binaryCheck.isBinary) {
         throw new Error(
           `Cannot read binary file: ${remotePath}\n\nReason: ${binaryCheck.reason}. Use bash tools to inspect it if needed.`
         )
       }
 
-      // Safe to sync: it's a text file
-      await syncEngine.register(remotePath)
-      await syncEngine.pullAll()
-
-      const buf = await fs.readFile(localPath)
-      // ignoreBOM: true preserves the BOM as a regular character in the output
-      // (false would consume/remove it, which is what readFileWithBom does for editing)
-      const content = new TextDecoder("utf-8", { ignoreBOM: true }).decode(buf)
-      const lines = content.split("\n")
-
-      // Offset validation
-      if (offset > lines.length && lines.length > 0) {
-        throw new Error(`Offset ${args.offset} is out of range (file has ${lines.length} lines)`)
-      }
-
-      const start = offset
-      let bytes = 0
-      const out: string[] = []
-      let cut = false
-      let more = false
-
-      for (let i = start; i < lines.length; i++) {
-        if (out.length >= limit) {
-          more = true
-          break
+      return syncEngine.transaction(async (transaction) => {
+        // Safe to sync: it's a text file
+        if (!(await transaction.pull(remotePath, ctx.abort))) {
+          throw new Error(`File not found: ${remotePath}`)
         }
-        let line = lines[i]
-        // Line length truncation
-        if (line.length > MAX_LINE_LENGTH) {
-          line = line.substring(0, MAX_LINE_LENGTH) + " ... (line truncated)"
-        }
-        const size = Buffer.byteLength(line, "utf-8") + (out.length > 0 ? 1 : 0)
-        if (bytes + size > MAX_BYTES) {
-          cut = true
-          more = true
-          break
-        }
-        out.push(line)
-        bytes += size
-      }
 
-      let output = [`<path>${remotePath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
-      output += out.map((line, i) => `${i + start + 1}: ${line}`).join("\n")
-      const last = start + out.length
-      if (cut) {
-        output += `\n\n(Output capped at ${MAX_BYTES / 1024} KB. Showing lines ${start + 1}-${last}. Use offset=${last + 1} to continue.)`
-      } else if (more) {
-        output += `\n\n(Showing lines ${start + 1}-${last} of ${lines.length}. Use offset=${last + 1} to continue.)`
-      } else {
-        output += `\n\n(End of file - total ${lines.length} lines)`
-      }
-      output += "\n</content>"
+        const buf = await fs.readFile(localPath)
+        // ignoreBOM: true preserves the BOM as a regular character in the output
+        // (false would consume/remove it, which is what readFileWithBom does for editing)
+        const content = new TextDecoder("utf-8", { ignoreBOM: true }).decode(buf)
+        const lines = content.split("\n")
 
-      return {
-        title: remotePath,
-        output,
-        metadata: {
-          preview: out.slice(0, 20).join("\n"),
-          truncated: more || cut,
-        },
-      }
+        // Offset validation
+        if (offset > lines.length && lines.length > 0) {
+          throw new Error(`Offset ${args.offset} is out of range (file has ${lines.length} lines)`)
+        }
+
+        const start = offset
+        let bytes = 0
+        const out: string[] = []
+        let cut = false
+        let more = false
+
+        for (let i = start; i < lines.length; i++) {
+          if (out.length >= limit) {
+            more = true
+            break
+          }
+          let line = lines[i]
+          // Line length truncation
+          if (line.length > MAX_LINE_LENGTH) {
+            line = line.substring(0, MAX_LINE_LENGTH) + " ... (line truncated)"
+          }
+          const size = Buffer.byteLength(line, "utf-8") + (out.length > 0 ? 1 : 0)
+          if (bytes + size > MAX_BYTES) {
+            cut = true
+            more = true
+            break
+          }
+          out.push(line)
+          bytes += size
+        }
+
+        let output = [`<path>${remotePath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
+        output += out.map((line, i) => `${i + start + 1}: ${line}`).join("\n")
+        const last = start + out.length
+        if (cut) {
+          output += `\n\n(Output capped at ${MAX_BYTES / 1024} KB. Showing lines ${start + 1}-${last}. Use offset=${last + 1} to continue.)`
+        } else if (more) {
+          output += `\n\n(Showing lines ${start + 1}-${last} of ${lines.length}. Use offset=${last + 1} to continue.)`
+        } else {
+          output += `\n\n(End of file - total ${lines.length} lines)`
+        }
+        output += "\n</content>"
+
+        return {
+          title: remotePath,
+          output,
+          metadata: {
+            preview: out.slice(0, 20).join("\n"),
+            truncated: more || cut,
+          },
+        }
+      })
     },
   })
-}
-
-function quoteShell(input: string): string {
-  if (/^[a-zA-Z0-9_.\/\-]+$/.test(input)) return input
-  return `"${input.replace(/"/g, '\\"')}"`
 }

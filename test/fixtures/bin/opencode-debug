@@ -1,0 +1,215 @@
+#!/usr/bin/env node
+
+import { spawn } from "node:child_process"
+import { appendFileSync, existsSync, mkdirSync } from "node:fs"
+
+if (process.argv.length === 3 && process.argv[2] === "--version") {
+  const result = await runChild(requiredEnvironment("FAKE_OPENCODE_REAL_BIN"), ["--version"], {
+    env: process.env,
+    shell: false,
+    stdio: ["ignore", "inherit", "inherit"],
+  })
+  if (result.error) process.stderr.write(`opencode-debug: ${result.error.message}\n`)
+  if (result.signal) process.kill(process.pid, result.signal)
+  process.exit(result.status ?? 1)
+}
+
+const childArgv = ["debug", "config"]
+const isolatedDirectoryNames = [
+  "HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_STATE_HOME",
+  "XDG_RUNTIME_DIR",
+  "TMPDIR",
+]
+const childEnvironmentNames = [
+  "PATH",
+  "HOME",
+  "PWD",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+  "TERM",
+  "NO_COLOR",
+  "CI",
+  "TMPDIR",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_STATE_HOME",
+  "XDG_RUNTIME_DIR",
+  "OPENCODE_CONFIG_DIR",
+  "OPENCODE_CONFIG_CONTENT",
+  "OPENCODE_DISABLE_AUTOUPDATE",
+  "OPENCODE_DISABLE_CLAUDE_CODE",
+  "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
+  "OPENCODE_DISABLE_DEFAULT_PLUGINS",
+  "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+  "OPENCODE_DISABLE_LSP_DOWNLOAD",
+  "OPENCODE_DISABLE_MODELS_FETCH",
+  "OPENCODE_DISABLE_PROJECT_CONFIG",
+  "OPENCODE_DISABLE_PRUNE",
+  "OPENCODE_DISABLE_SHARE",
+  "OPENCODE_SSH_ALIAS",
+  "OPENCODE_SSH_WORKDIR",
+  "OPENCODE_SSH_SOCKET",
+  "OPENCODE_SSH_TARGET_ID",
+  "OPENCODE_SSH_LAUNCH_ID",
+  "OPENCODE_SSH_READY_PATH",
+  "OPENCODE_SSH_READY_NONCE",
+  "OPENCODE_SSH_RUNTIME_DIR",
+  "OPENCODE_SSH_MIRROR_ROOT",
+  "OPENCODE_SSH_SSH_BIN",
+  "OPENCODE_SSH_SFTP_BIN",
+  "FAKE_SSH_LOG",
+  "FAKE_SSH_INPUT",
+  "FAKE_SSH_INPUT_LOG",
+  "FAKE_SSH_STDOUT",
+  "FAKE_SSH_STDERR",
+  "FAKE_SSH_EXIT_CODE",
+  "FAKE_SFTP_LOG",
+  "FAKE_SFTP_INPUT",
+  "FAKE_SFTP_INPUT_LOG",
+  "FAKE_SFTP_STDOUT",
+  "FAKE_SFTP_STDERR",
+  "FAKE_SFTP_EXIT_CODE",
+]
+const selectedLauncherEnvironmentNames = [
+  "OPENCODE_SSH_ALIAS",
+  "OPENCODE_SSH_WORKDIR",
+  "OPENCODE_SSH_SOCKET",
+  "OPENCODE_SSH_TARGET_ID",
+  "OPENCODE_SSH_LAUNCH_ID",
+  "OPENCODE_SSH_READY_PATH",
+  "OPENCODE_SSH_RUNTIME_DIR",
+  "OPENCODE_SSH_MIRROR_ROOT",
+  "OPENCODE_SSH_SSH_BIN",
+  "OPENCODE_SSH_SFTP_BIN",
+]
+
+for (const name of isolatedDirectoryNames) {
+  mkdirSync(requiredEnvironment(name), { recursive: true, mode: 0o700 })
+}
+
+const childEnvironment = Object.fromEntries(
+  childEnvironmentNames.flatMap((name) => {
+    const value = process.env[name]
+    return value === undefined ? [] : [[name, value]]
+  })
+)
+const result = await runChild(requiredEnvironment("FAKE_OPENCODE_REAL_BIN"), childArgv, {
+  cwd: process.cwd(),
+  env: childEnvironment,
+  shell: false,
+  stdio: ["ignore", "ignore", "inherit"],
+})
+
+const readyPath = process.env.OPENCODE_SSH_READY_PATH
+const invocation = {
+  argv: process.argv.slice(2),
+  childArgv,
+  cwd: process.cwd(),
+  configContent: process.env.OPENCODE_CONFIG_CONTENT,
+  env: Object.fromEntries(
+    selectedLauncherEnvironmentNames.map((name) => [name, process.env[name]])
+  ),
+  wrapperEnvironmentNames: Object.keys(process.env).sort(),
+  childEnvironmentNames: Object.keys(childEnvironment).sort(),
+  readyExistsAfterChild: readyPath ? existsSync(readyPath) : false,
+  exitCode: result.status,
+  signal: result.signal,
+}
+appendFileSync(
+  requiredEnvironment("FAKE_OPENCODE_LOG"),
+  `${JSON.stringify(invocation)}\n`
+)
+
+if (result.error) {
+  process.stderr.write(`opencode-debug: ${result.error.message}\n`)
+}
+
+const delayMs = configuredDelay()
+if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+
+if (result.signal) {
+  process.kill(process.pid, result.signal)
+}
+process.exit(result.status ?? 1)
+
+function requiredEnvironment(name) {
+  const value = process.env[name]
+  if (!value) throw new Error(`OpenCode debug wrapper requires ${name}`)
+  return value
+}
+
+function configuredDelay() {
+  const value = process.env.FAKE_OPENCODE_DELAY_MS
+  if (value === undefined) return 0
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error("OpenCode debug wrapper requires a non-negative delay")
+  }
+  return parsed
+}
+
+function runChild(command, args, options) {
+  return new Promise((resolve) => {
+    const useProcessGroup = process.platform !== "win32"
+    const child = spawn(command, args, { ...options, detached: useProcessGroup })
+    let settled = false
+    let forceKillTimer
+    let pendingResult
+    const signalChild = (signal) => {
+      if (!child.pid) return
+      if (!useProcessGroup && child.exitCode !== null) return
+      try {
+        if (useProcessGroup) process.kill(-child.pid, signal)
+        else child.kill(signal)
+      } catch {
+        // A concurrent child exit is handled below.
+      }
+    }
+    const signalHandlers = new Map(
+      ["SIGINT", "SIGTERM"].map((signal) => [
+        signal,
+        () => {
+          signalChild(signal)
+          if (!forceKillTimer) {
+            forceKillTimer = setTimeout(() => {
+              signalChild("SIGKILL")
+              forceKillTimer = undefined
+              if (pendingResult) finish(pendingResult)
+            }, 100)
+          }
+        },
+      ])
+    )
+    const cleanup = () => {
+      if (forceKillTimer) clearTimeout(forceKillTimer)
+      for (const [signal, handler] of signalHandlers) {
+        process.removeListener(signal, handler)
+      }
+    }
+    const finish = (result) => {
+      if (settled) return
+      if (forceKillTimer) {
+        pendingResult = result
+        return
+      }
+      settled = true
+      cleanup()
+      resolve(result)
+    }
+
+    for (const [signal, handler] of signalHandlers) {
+      process.on(signal, handler)
+    }
+    child.once("error", (error) => finish({ error, status: null, signal: null }))
+    child.once("close", (status, signal) => finish({ status, signal }))
+  })
+}

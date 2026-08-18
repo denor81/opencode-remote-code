@@ -1,264 +1,94 @@
-# 🌐 Remote Code
+# OpenCode SSH
 
 [English](README.md)
 
-一款 OpenCode 插件，让 AI Agent 能够通过 SSH 直接操控远程机器——**远程端零依赖**，仅需 SSH 守护进程即可。无需在远程安装任何 agent、运行时或依赖。
+在本机运行 OpenCode 和 TUI，同时通过系统 OpenSSH 在远程主机上执行常用项目工具。
+远程主机无需安装 OpenCode、Node.js、插件或其他 agent runtime。
 
-对 AI 而言，一切感知与本地无异：它调用的仍然是 `bash`、`edit`、`write`、`read`、`glob`、`grep` 和 `apply_patch`。
-
----
-
-## 💡 为什么需要 Remote Code？
-
-我是一名模拟 IC 工程师。日常工作依赖 **Cadence IC6.1.7 设计套件**，它运行在一台古老的 **CentOS 6 虚拟机**上。CentOS 6 的 glibc 版本无法安装任何现代化 agent 工具，Node.js、Python 3.11+ 甚至大多数现代 CLI 工具都无法运行。
-
-我需要在本地 Windows 主机使用 OpenCode 来操控这台虚拟机——自动化设计流程、批量修改原理图参数、运行仿真脚本。**Remote Code** 让这一切成为可能：AI 以为自己在直接操作本地文件，实际上每个命令都在那台古老的虚拟机上执行。
-
-![pic](pic.png)
-
-**无需触碰虚拟机上的任何一个文件，只需 SSH 服务在运行。**
-
-| 场景                           | 痛点                       | Remote Code 的解法     |
-| :----------------------------- | :------------------------- | :--------------------- |
-| 老旧虚拟机（CentOS 6、RHEL 5） | 无法安装现代 agent         | 仅需 SSH               |
-| 生产服务器                     | 合规严格，禁止随意安装软件 | 远程不留任何痕迹       |
-| 嵌入式/边缘设备                | 资源受限，无包管理器       | 所有智能逻辑在本地运行 |
-| 远程 Windows 主机              | 只需安装 OpenSSH           | 统一操控入口           |
-| 容器/临时环境                  | 不想反复配置               | 即连即用，退出无残留   |
-
----
-
-## 🔌 独立 MCP Server
-
-当前仓库是 **OpenCode 插件版**：
-<https://github.com/zz6zz666/opencode-remote-code>
-
-同一 GitHub 账号下也会有独立 MCP server 版本：
-<https://github.com/zz6zz666/mcp-remote-code>
-
-两个项目有相同的零侵入 SSH 动机，但面向不同工作流：
-
-- **OpenCode 插件版**：深度绑定 OpenCode。它覆盖原生工具，把远端机器完全伪装成 agent workspace。运行时环境完全在远端，本地目录不会自然进入 agent 的普通视野。
-- **MCP server 版**：向任意 MCP 客户端暴露带命名空间的 `remote_*` 工具。本地和远端工作可以并存，agent 可以在本地维护设计笔记或查找表，同时在 SSH 目标上执行远端命令、编辑、patch、pull、push 和仿真任务。
-
----
-
-## 📋 前置要求
-
-- **OpenCode**（最新版本）
-- 远程机器上运行的 **SSH 服务**（**唯一的远程依赖**）
-
-> **注意**：本插件内部使用纯 Node.js 的 `ssh2` 库。你**不需要**在本地安装 `ssh`、`sshpass` 或 `rsync`。
-
----
-
-## 🚀 安装
-
-本插件包含外部依赖且需要构建，**必须从源码安装**。
+本项目已针对 OpenCode 1.18.18 完成测试。其他版本可以继续启动，但 launcher 会先
+显示兼容性警告并等待三秒；正式使用前应完成手动 TUI 检查。
 
 ```bash
-# 1. 下载或克隆
-git clone https://github.com/zz6zz666/opencode-remote-code.git
+opencode-ssh staging /srv/app
+opencode-ssh staging /
+```
 
-# 2. 安装依赖并构建
-cd opencode-remote-code
-npm install
+`staging` 会原样传递给系统 `ssh` 和 `sftp`。`~/.ssh/config`、SSH key、
+`ssh-agent`、`known_hosts`、`ProxyJump` 和算法配置均由 OpenSSH 处理。
+
+## 安装
+
+```bash
+npm ci
 npm run build
+npm install -g .
 ```
 
-构建完成后，选择以下任一方式：
+要求 Node.js 22.22.2+、本机已安装 OpenCode，以及可用的 `ssh` 和 `sftp`。
+OpenCode 1.18.18 是当前测试基线。Windows 用户应在 WSL 中运行。远端初始支持
+Linux、SFTP、POSIX `sh` 以及 `realpath`/`pwd -P`。
 
-### 方式 A：复制到 OpenCode 插件目录（推荐）
+完整的英文安装、SSH 配置、本地启动脚本、安全说明和手动 TUI 测试请参阅
+[Installation And Usage](docs/installation-and-usage.md)。
 
-将构建好的插件复制到 OpenCode 插件目录，之后即可删除原始下载：
+## 用法
+
+命令只接受 SSH alias 和远程绝对路径，不转发额外 OpenCode 参数：
 
 ```bash
-# Linux/macOS:
-cp -r . ~/.config/opencode/plugins/remote-code
-
-# Windows (PowerShell):
-Copy-Item -Recurse -Force . $env:USERPROFILE\.config\opencode\plugins\remote-code
+opencode-ssh <ssh-alias> <absolute-remote-workdir>
 ```
 
-> OpenCode 从 `~/.config/opencode/plugins/`（全局）或 `.opencode/plugins/`（项目级）加载本地插件。目录必须包含 `package.json` 和构建好的 `dist/` 文件夹。
+模型、provider、权限、插件和 MCP 配置继续使用普通 OpenCode 配置。
 
-### 方式 B：直接引用源码路径（开发用）
+启动 SSH 之前，launcher 会检查本机 `opencode` 版本。1.18.18 不显示警告；其他
+版本或无法识别的版本会显示提示、等待三秒，然后继续运行。版本差异本身不会阻止
+启动。
 
-保持插件原位，让 OpenCode 直接引用：
+`~/.config/opencode` 下的全局配置以及绝对路径的显式配置会保留。由于 OpenCode
+从稳定的 launcher workspace 启动，调用命令目录中的 `opencode.json` 或
+`.opencode/` 不会自动加载；远程会话所需设置应放入全局配置或绝对路径的
+`OPENCODE_CONFIG`。远程根目录的 `AGENTS.md`（若存在）会追加到 system context。
+目标项目可以加入通用的
+[`opencode-ssh-safety.md`](opencode-ssh-remote-use/opencode-ssh-safety.md)，并在根
+`AGENTS.md` 中明确要求 agent 阅读和遵循该文件；无需嵌套 `AGENTS.md`。
 
-```json
-{
-  "plugin": ["/absolute/path/to/opencode-remote-code"]
-}
+远程 workdir 是默认项目目录，但不是 chroot。直接访问 workdir 外的文件会请求
+`external_directory` 权限。`/` 可作为 workdir，此时整个远程文件系统都在项目
+范围内，但实际权限仍取决于 SSH 用户。
+
+管理操作应使用明确的 `sudo -n` shell 命令。SFTP 支持的 `read`、`write`、
+`edit` 和 `apply_patch` 不会通过 sudo 自动提权。
+
+## 工具边界
+
+以下工具通过 SSH 工作：`bash`、`read`、`write`、`edit`、`glob`、`grep`、
+`apply_patch`。`remote_status` 用于报告连接状态。
+
+其他 OpenCode 工具、插件、MCP、LSP、formatter、provider 流量和 TUI 内部功能
+仍在本机运行。本项目不是 sandbox，也不保证所有 OpenCode 操作都在远端执行。
+
+## SSH 密钥
+
+launcher 禁用 SSH 账户密码和 keyboard-interactive fallback，但不启用
+`BatchMode`。因此 OpenSSH 仍可请求确认 host key 或 key passphrase。若 key 已加载
+到当前用户的 `ssh-agent`，launcher 会继承 `SSH_AUTH_SOCK`，通常不会再次询问。
+
+## 测试
+
+```bash
+npm run lint
+npm run build
+npm run test:unit
+npm run test:integration
+npm run test:smoke
 ```
 
-开发时可用 `npm run dev` 监听变更并自动重新构建。
+远程写入测试必须使用独立的非生产服务器和一次性目录。当前版本会在上传前检测
+单文件内容冲突并通过同目录临时文件原子替换；多文件 patch 在传输故障时仍可能
+部分完成。patch 删除和移动操作会被拒绝。详细边界请参阅
+[SECURITY.md](SECURITY.md)。
 
----
-
-## 🎯 使用方式
-
-远程模式**仅通过环境变量激活**。OpenCode CLI 不识别 `--remote*` 参数，且 `opencode.json` 中的 plugin options 会因内部缓存而不可靠。
-
-### 启动脚本
-
-`launchers/` 目录下包含为各主流平台预制的启动脚本。**强烈建议使用它们**，因为它们解决了一个会话持久化问题：OpenCode 的会话与当前工作目录绑定，如果你从不同的本地文件夹启动，远程会话就会"消失"。这些启动脚本会根据远程目标自动派生一个稳定的本地会话目录，确保无论你从何处调用，会话始终持久。
-
-1. 根据你的平台复制对应的启动脚本到 `$PATH` 中的某个位置（或放在任何方便的位置）：
-
-   ```bash
-   # Linux / macOS
-   cp launchers/remote-opencode.sh ~/bin/remote-opencode
-   chmod +x ~/bin/remote-opencode
-
-   # Windows PowerShell
-   Copy-Item launchers\remote-opencode.ps1 $env:USERPROFILE\bin\remote-opencode.ps1
-
-   # Windows CMD
-   copy launchers\remote-opencode.bat %USERPROFILE%\bin\remote-opencode.bat
-   ```
-
-2. 编辑脚本中的 **"User Configuration"** 配置块，填入你的 `REMOTE_SSH`、`REMOTE_WORKDIR` 以及可选的认证信息。
-
-3. 用启动脚本代替 `opencode` 直接启动：
-
-   ```bash
-   remote-opencode
-   ```
-
-启动脚本会自动完成以下操作：
-- 创建并进入稳定的本地会话目录（例如 `~/.opencode/remote-sessions/host_home_project/`）
-- 导出所需的环境变量
-- 从该稳定目录启动 OpenCode
-
-如果你的远程是 legacy SSH 服务器（例如 OpenSSH 5.3），还可以取消脚本中可选的 **SSH 连接池调优** 变量注释，以调整并发连接数。
-
-### 配置选项
-
-| 环境变量                   | 说明                                          | 默认值                   |
-| :------------------------- | :-------------------------------------------- | :----------------------- |
-| `REMOTE_SSH`             | 完整的 SSH 连接命令（与终端输入格式完全一致） | *(必填)*               |
-| `REMOTE_WORKDIR`         | 远程工作目录（绝对路径）                      | *(必填)*               |
-| `REMOTE_MIRROR`          | 本地镜像根目录                                | `~/.opencode/mirrors/` |
-| `REMOTE_PASSWORD`        | SSH 登录密码                                  | *(可选)*               |
-| `REMOTE_SUDO_PASSWORD`   | 远程命令的 sudo 密码                          | *(可选)*               |
-| `REMOTE_POOL_COMMAND_SIZE` | SSH exec 连接池大小（`bash`/`glob`/`grep`） | `3`                    |
-| `REMOTE_POOL_FILE_SIZE`  | SFTP 连接池大小（`read`/`write`/`edit`/`patch`） | `2`                 |
-| `REMOTE_POOL_STAGGER_MS` | 顺序 SSH 握手之间的延迟（毫秒），用于兼容旧服务器 | `0`                 |
-
-若未设置 `REMOTE_SSH`，插件保持休眠，OpenCode 完全按本地模式运行。
-
-### 认证示例
-
-**密钥认证（推荐）：**
-
-```bat
-set "REMOTE_SSH=ssh -i C:\Users\me\.ssh\id_rsa user@host"
-set "REMOTE_WORKDIR=/home/project"
-```
-
-**密码认证：**
-
-```bat
-set "REMOTE_SSH=ssh user@host"
-set "REMOTE_WORKDIR=/home/project"
-set "REMOTE_PASSWORD=mypassword"
-```
-
-**sudo 命令：**
-
-```bat
-set "REMOTE_SSH=ssh user@host"
-set "REMOTE_WORKDIR=/app"
-set "REMOTE_PASSWORD=mypassword"
-set "REMOTE_SUDO_PASSWORD=mysudopass"
-```
-
-AI 随后可以在 `bash` 命令中自然地使用 `sudo`，不会遇到交互式密码提示。
-
----
-
-## ⚙️ 工作原理
-
-### 1. 本地镜像
-
-Remote Code **不做全量目录镜像**，只同步 AI 实际触碰过的文件。镜像目录结构：
-
-```
-~/.opencode/mirrors/
-└── root_192.168.184.135/
-    └── home_project/
-        ├── manifest.json          # 触碰文件清单
-        └── home/project/          # 镜像目录树
-            └── src/
-                └── main.ts
-```
-
-### 2. 路径映射
-
-**AI 看到的所有路径都是远程绝对路径**。插件在后台透明转换：
-
-```
-AI 看到:     /home/project/src/main.ts
-本地路径:    ~/.opencode/mirrors/root_192.168.184.135/home_project/home/project/src/main.ts
-```
-
-### 3. 同步引擎
-
-文件编辑类工具（`read`、`write`、`edit`、`apply_patch`）在本地镜像上操作，通过 SFTP 借助持久 SSH 连接同步：
-
-- **编辑前** → `pullAll()` 确保本地镜像与远程一致
-- **编辑后** → `pushAll()` 将修改上传到远程
-
-命令执行类工具（`bash`、`glob`、`grep`）直接通过 SSH 在远程执行。
-
-### 4. SSH 架构
-
-插件使用 `ssh2` 库维护连接池：
-
-- **命令池**（5 个连接）：用于 `bash`、`glob`、`grep` 执行
-- **文件池**（3 个连接）：用于 SFTP 文件传输
-
-不需要外部 `ssh`、`sshpass` 或 `rsync` 可执行文件。
-
----
-
-## 📊 工具行为矩阵
-
-| 工具            | 执行位置 | 同步                     | 说明                                                                |
-| :-------------- | :------- | :----------------------- | :------------------------------------------------------------------ |
-| `bash`        | 远程 SSH | 无                       | 命令直接转发到远程 shell                                            |
-| `glob`        | 远程 SSH | 无                       | 远程 `rg --files --sortr=modified`（fallback 到 `find + stat`） |
-| `grep`        | 远程 SSH | 无                       | 远程 `rg --json`（fallback 到 `grep -rn`）                      |
-| `read`        | 本地镜像 | 执行前 pull              | 读取已同步的镜像文件                                                |
-| `write`       | 本地镜像 | 条件 pull，执行后 push   | 本地写入后上传                                                      |
-| `edit`        | 本地镜像 | 执行前 pull，执行后 push | 本地精确替换后上传                                                  |
-| `apply_patch` | 本地镜像 | 执行前 pull，执行后 push | 本地应用 patch 后上传                                               |
-
----
-
-## 🔒 安全边界
-
-- **路径安全**：`PathMapper` 校验本地路径不超出镜像根目录，`../` 穿透会被拒绝。
-- **命令安全**：`bash` 工具的动态参数尽量直接通过 SSH 传递，避免本地 shell 插值。
-- **权限边界**：远程操作权限与 SSH 用户一致，不提升权限。
-- **工作目录**：操作非工作目录内的文件时触发 OpenCode 原生确认流程。
-
----
-
-## ⚠️ 局限性
-
-| 局限               | 影响                                                             | 缓解                              |
-| :----------------- | :--------------------------------------------------------------- | :-------------------------------- |
-| 大文件首次访问延迟 | 单个大文件首次下载需等待                                         | 后续 SFTP 仅传差异                |
-| 无远程 LSP         | 远程文件无语言服务器诊断                                         | 非基本编辑的必需功能              |
-| 远程环境依赖       | `glob`/`grep` 优先远程 `rg`，fallback 到 `find`/`grep` | 绝大多数 Linux 发行版内置         |
-| 并发编辑安全       | `edit` 工具带 per-file 锁，同一文件并发编辑自动串行化          | `bash`/`glob`/`grep` 无状态 |
-| 二进制文件         | `read` 通过扩展名 + 内容采样检测二进制文件                     | 二进制文件请用 `bash` 工具查看  |
-| BOM 处理           | `read`/`write`/`edit`/`patch` 自动保留 UTF-8 BOM         | 完全透明，无需用户干预            |
-
----
-
-## 📄 许可
-
-MIT
+真实 loader 集成测试会使用任意已安装的 OpenCode 版本；只有找不到 `opencode`
+时才允许跳过。自动测试无法观察 TUI 绘制，因此版本变更后仍需执行英文安装指南中
+的五项手动检查。

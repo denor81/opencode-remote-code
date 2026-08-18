@@ -1,5 +1,7 @@
-import { tool } from "@opencode-ai/plugin"
+import { tool, type ToolDefinition } from "@opencode-ai/plugin"
 import type { RemoteConfig } from "../config.js"
+import type { RemotePathResolver } from "../remote-path-resolver.js"
+import { remotePermissionPattern } from "../remote-path.js"
 import type { SSHPool } from "../ssh-pool.js"
 
 interface RgMatch {
@@ -28,7 +30,11 @@ interface RgSummary {
 
 type RgMessage = RgMatch | RgSummary | { type: string }
 
-export function createGrepTool(config: RemoteConfig, sshPool: SSHPool) {
+export function createGrepTool(
+  config: RemoteConfig,
+  sshPool: SSHPool,
+  pathResolver: RemotePathResolver
+): ToolDefinition {
   return tool({
     description: `Search file contents using grep/ripgrep on the remote machine.`,
     args: {
@@ -37,7 +43,17 @@ export function createGrepTool(config: RemoteConfig, sshPool: SSHPool) {
       include: tool.schema.string().optional().describe("File pattern to include in the search (e.g. '*.js', '*.{ts,tsx}')"),
     },
     async execute(args, ctx) {
-      const searchDir = args.path || config.remoteWorkdir
+      const searchDir = await pathResolver.resolveExisting(
+        args.path || config.remoteWorkdir,
+        ctx
+      )
+      const permissionPattern = remotePermissionPattern(config.remoteWorkdir, searchDir)
+      await ctx.ask({
+        permission: "grep",
+        patterns: [permissionPattern],
+        always: [permissionPattern],
+        metadata: { executor: "ssh", remotePath: searchDir },
+      })
       const limit = 100
 
       // Try ripgrep with JSON output and reverse-time sorting first
@@ -50,21 +66,30 @@ export function createGrepTool(config: RemoteConfig, sshPool: SSHPool) {
         cmd = `cd ${quoteShell(searchDir)} && rg --json --sortr=modified -n -- '${escapedPattern}' 2>/dev/null`
       }
 
-      let result = await sshPool.exec(cmd, { timeout: 30_000 })
+      let result = await sshPool.exec(cmd, { timeout: 30_000, signal: ctx.abort })
 
       // Fallback to grep if rg not available or produced no output
-      if (!result.stdout.trim()) {
+      if (!result.stdout.trim() || result.exitCode > 1) {
         if (args.include) {
           const glob = args.include.replace(/'/g, "'\"'\"'")
           cmd = `cd ${quoteShell(searchDir)} && grep -Ern --include='${glob}' -- '${escapedPattern}' . 2>/dev/null`
         } else {
           cmd = `cd ${quoteShell(searchDir)} && grep -Ern -- '${escapedPattern}' . 2>/dev/null`
         }
-        result = await sshPool.exec(cmd, { timeout: 30_000 })
-        return parseGrepOutput(result.stdout, searchDir, args.pattern, limit)
+        result = await sshPool.exec(cmd, { timeout: 30_000, signal: ctx.abort })
+        if (result.exitCode > 1) {
+          throw new Error(`Remote grep failed: ${result.stderr || result.stdout}`)
+        }
+        return markTransportTruncation(
+          parseGrepOutput(result.stdout, searchDir, args.pattern, limit),
+          result.stdoutTruncated || result.stderrTruncated
+        )
       }
 
-      return parseRgJsonOutput(result.stdout, searchDir, args.pattern, limit)
+      return markTransportTruncation(
+        parseRgJsonOutput(result.stdout, searchDir, args.pattern, limit),
+        result.stdoutTruncated || result.stderrTruncated
+      )
     },
   })
 }
@@ -161,6 +186,16 @@ function formatGrepResult(
     output: output.join("\n"),
     metadata: { matches: total, truncated },
   }
+}
+
+function markTransportTruncation<T extends { output: string; metadata: { truncated: boolean } }>(
+  result: T,
+  truncated: boolean
+): T {
+  if (!truncated) return result
+  result.output += "\n\n(Output truncated by opencode-ssh.)"
+  result.metadata.truncated = true
+  return result
 }
 
 import { quoteShell } from "../shell-quote.js"

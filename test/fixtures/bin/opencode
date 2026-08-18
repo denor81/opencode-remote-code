@@ -1,0 +1,118 @@
+#!/usr/bin/env node
+
+import { createHash, randomUUID } from "node:crypto"
+import { spawn } from "node:child_process"
+import {
+  appendFileSync,
+  chmodSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs"
+
+const argv = process.argv.slice(2)
+if (argv.length === 1 && argv[0] === "--version") {
+  const packageJson = JSON.parse(
+    readFileSync(new URL("../../../package.json", import.meta.url), "utf8")
+  )
+  const output =
+    process.env.FAKE_OPENCODE_VERSION_STDOUT ??
+    `${packageJson.dependencies["@opencode-ai/plugin"]}\n`
+  const errorOutput = process.env.FAKE_OPENCODE_VERSION_STDERR ?? ""
+  const pidFile = process.env.FAKE_OPENCODE_PID_FILE
+  if (pidFile) writeFileSync(pidFile, `${process.pid}\n`)
+  if (process.env.FAKE_OPENCODE_IGNORE_SIGTERM === "1") {
+    process.on("SIGTERM", () => undefined)
+  }
+  if (process.env.FAKE_OPENCODE_SPAWN_DESCENDANT === "1") {
+    const descendant = spawn(
+      process.execPath,
+      [
+        "-e",
+        "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
+      ],
+      { stdio: ["ignore", "inherit", "inherit"] }
+    )
+    const descendantPidFile = process.env.FAKE_OPENCODE_DESCENDANT_PID_FILE
+    if (descendantPidFile && descendant.pid) {
+      writeFileSync(descendantPidFile, `${descendant.pid}\n`)
+    }
+  }
+  if (output) process.stdout.write(output)
+  if (errorOutput) process.stderr.write(errorOutput)
+  const delayMs = configuredNumber("FAKE_OPENCODE_VERSION_DELAY_MS", 0)
+  if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+  process.exit(configuredNumber("FAKE_OPENCODE_VERSION_EXIT_CODE", 0))
+}
+
+const selectedEnvironmentNames = [
+  "OPENCODE_SSH_ALIAS",
+  "OPENCODE_SSH_WORKDIR",
+  "OPENCODE_SSH_SOCKET",
+  "OPENCODE_SSH_TARGET_ID",
+  "OPENCODE_SSH_LAUNCH_ID",
+  "OPENCODE_SSH_READY_PATH",
+  "OPENCODE_SSH_RUNTIME_DIR",
+  "OPENCODE_SSH_MIRROR_ROOT",
+  "OPENCODE_SSH_SSH_BIN",
+  "OPENCODE_SSH_SFTP_BIN",
+]
+
+const readyNonce = process.env.OPENCODE_SSH_READY_NONCE
+const invocation = {
+  argv,
+  cwd: process.cwd(),
+  PWD: process.env.PWD,
+  configContent: process.env.OPENCODE_CONFIG_CONTENT,
+  env: Object.fromEntries(
+    selectedEnvironmentNames.map((name) => [name, process.env[name]])
+  ),
+  readyNonceHash: readyNonce ? sha256(readyNonce) : undefined,
+}
+
+const logPath = process.env.FAKE_OPENCODE_LOG
+if (logPath) appendFileSync(logPath, `${JSON.stringify(invocation)}\n`)
+
+if (process.env.FAKE_OPENCODE_WRITE_READY === "1") {
+  const readyPath = requiredEnvironment("OPENCODE_SSH_READY_PATH")
+  const record = {
+    protocol: "opencode-ssh-ready-v1",
+    launchID: requiredEnvironment("OPENCODE_SSH_LAUNCH_ID"),
+    nonceHash: sha256(requiredEnvironment("OPENCODE_SSH_READY_NONCE")),
+    alias: requiredEnvironment("OPENCODE_SSH_ALIAS"),
+    canonicalWorkdir: requiredEnvironment("OPENCODE_SSH_WORKDIR"),
+    targetID: requiredEnvironment("OPENCODE_SSH_TARGET_ID"),
+  }
+  const temporaryPath = `${readyPath}.${process.pid}.${randomUUID()}.tmp`
+  writeFileSync(temporaryPath, `${JSON.stringify(record)}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+  })
+  chmodSync(temporaryPath, 0o600)
+  renameSync(temporaryPath, readyPath)
+}
+
+const delayMs = configuredNumber("FAKE_OPENCODE_DELAY_MS", 0)
+if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+process.exit(configuredNumber("FAKE_OPENCODE_EXIT_CODE", 0))
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex")
+}
+
+function requiredEnvironment(name) {
+  const value = process.env[name]
+  if (!value) throw new Error(`Fake OpenCode requires ${name}`)
+  return value
+}
+
+function configuredNumber(name, fallback) {
+  const value = process.env[name]
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`Fake OpenCode requires a non-negative integer for ${name}`)
+  }
+  return parsed
+}

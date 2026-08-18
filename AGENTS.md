@@ -1,286 +1,57 @@
-# Remote Code — Agent Guide
-
-## Project Overview
-
-Remote Code is an OpenCode plugin that lets AI agents operate on remote machines over SSH, with zero footprint on the remote side. The remote machine only needs an SSH daemon; no agent, runtime, or dependency installation is required.
-
-## Design Decisions
-
-### SSH Argument Passing
-
-Remote mode is activated **exclusively via environment variables**. The plugin reads `REMOTE_SSH`, `REMOTE_WORKDIR`, `REMOTE_PASSWORD`, and `REMOTE_SUDO_PASSWORD` from `process.env` at load time.
-
-`REMOTE_SSH` accepts a **single SSH command string** exactly as a user would type in their terminal:
-
-```bash
-export REMOTE_SSH='ssh -oHostKeyAlgorithms=+ssh-rsa -i ~/.ssh/id_rsa user@host'
-export REMOTE_WORKDIR='/home/project'
-```
-
-This gives users unlimited flexibility: any SSH option (`-o`, `-i`, `-p`, `-J` for jump hosts, `-v`, etc.) works without the plugin needing to know about it.
-
-From this string we parse:
-
-- `-o Key=Value` → extra SSH options
-- `-i path` → identity file
-- `-p port` → port (default 22)
-- `user@host` → credentials and target
-
-> **Note**: OpenCode's CLI does not recognize `--remote*` flags. Do not pass them on the command line — use a launcher script (`.bat`, `.ps1`, or `.sh`) that sets the environment variables before calling `opencode`.
-
-### Session Persistence & Stable Working Directory
-
-OpenCode's core ties sessions to the local working directory (`process.cwd()`). If you launch OpenCode from different local folders, your remote sessions appear to "disappear" because OpenCode filters sessions by the current directory.
-
-To fix this, Remote Code implements **two complementary strategies**:
-
-#### Strategy A: Launcher Scripts (always works)
-
-Use the provided launcher scripts to always start OpenCode from a **stable local directory** derived from your remote target:
-
-```bash
-# Linux / macOS
-chmod +x launchers/remote-opencode.sh
-./launchers/remote-opencode.sh
-
-# Windows PowerShell
-.\launchers\remote-opencode.ps1
-
-# Windows CMD
-launchers\remote-opencode.bat
-```
-
-The launcher derives a unique local session directory from the remote host + remote workdir:
-
-```
-~/.opencode/remote-sessions/<host>_<remote_dir_slug>/
-```
-
-This ensures:
-- Sessions are always bound to the same stable local path, regardless of where you invoke the launcher.
-- Different remote machines / directories get isolated session directories automatically.
-- No changes to OpenCode core or plugin code are required.
-
-**Optional environment variables in launchers:**
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `REMOTE_POOL_COMMAND_SIZE` | SSH exec connection pool size | `3` |
-| `REMOTE_POOL_FILE_SIZE` | SFTP connection pool size | `2` |
-| `REMOTE_POOL_STAGGER_MS` | Delay between sequential SSH handshakes | `0` |
-
-
-### Tool Strategy: Full Override via Plugin Tools
-
-All seven tools (`bash`, `glob`, `grep`, `read`, `write`, `edit`, `apply_patch`) are implemented as **plugin tools that override built-in tools by name**.
-
-Why full overrides instead of hooks for file operations:
-
-- Plugin tool `execute` functions run outside OpenCode’s Effect system. They **cannot access internal services** (`LSP.Service`, `AppFileSystem.Service`, `Bus.Service`).
-- This is actually desirable: file-editing plugin tools naturally avoid LSP diagnostics and file-watcher events that would otherwise fire against an incomplete local mirror and leak confusing output to the AI.
-- `bash`/`glob`/`grep` must be fully rewritten anyway because their core execution logic (local shell / ripgrep) cannot be repurposed through hooks.
-- For `read`/`write`/`edit`/`patch`, we rewrite them to operate on the local mirror and wrap each call with `pull` / `push` SFTP operations.
-
-### Local Mirror + On-Demand Sync
-
-Only files the AI actually touches are synchronized. The mirror lives at:
-
-```
-~/.opencode/mirrors/<host_slug>/<remote_root_slug>/
-```
-
-- A `manifest.json` tracks which remote files have local copies.
-- `SyncEngine.pullAll()` rsyncs the manifest’s files from remote to local before a read/edit.
-- `SyncEngine.pushAll()` rsyncs them back after a write/edit/patch.
-- We do not track "dirtiness"; we call rsync unconditionally and let its delta algorithm decide what to transfer.
-
-### Path Mapping
-
-All paths visible to the AI are **remote absolute paths**. The plugin translates them to local mirror paths transparently:
-
-```
-Remote:  /home/project/src/main.ts
-Local:   ~/.opencode/mirrors/root_192.168.1.3/home_project/home/project/src/main.ts
-```
-
-`PathMapper` provides:
-
-- `toLocal(remotePath)` → local mirror path
-- `toRemote(localPath)` → remote path
-- `isWithinWorkspace(remotePath)` → security boundary check
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  OpenCode Agent Engine + TUI Renderer                       │
-│  (unchanged)                                                │
-└────────┬────────────────────────┬───────────────────────────┘
-         │ calls tools by name    │ loads TUI slots
-         ▼                        ▼
-┌──────────────────────┐  ┌─────────────────────────────────┐
-│  Server Plugin       │  │  TUI Plugin                     │
-│  (dist/index.js)     │  │  (dist/tui.jsx)                 │
-│                      │  │                                 │
-│  ┌─────────────┐     │  │  ┌───────────────────────────┐  │
-│  │ Tool Overrides│    │  │  │ session_prompt_right      │  │
-│  │ (bash/glob/  │     │  │  │ home_prompt_right         │  │
-│  │  grep/read/  │     │  │  │ → "🌐 Remote: host /path" │  │
-│  │  write/edit/ │     │  │  └───────────────────────────┘  │
-│  │  patch)      │     │  └─────────────────────────────────┘
-│  └──────┬───────┘     │
-│         │             │
-│         ▼             │
-│  ┌─────────────────┐  │
-│  │  PathMapper     │  │
-│  │  SyncEngine     │  │
-│  │  SSHPool        │  │
-│  └─────────────────┘  │
-└───────────┬───────────┘
-            │
-            ▼
-┌──────────────────────────────────────────────┐
-│  Local Mirror FS                             │
-│  (read/write/edit/patch operate here)        │
-└──────────────────────────────────────────────┘
-         │
-    SFTP over ssh2 persistent connections
-         │
-         ▼
-┌──────────────────────────────────────────────┐
-│  Remote Machine (sshd only)                  │
-└──────────────────────────────────────────────┘
-```
-
-## Key Implementation Details
-
-### SSH Connection Pools
-
-The plugin uses the pure-Node.js `ssh2` library to maintain persistent SSH connections:
-
-- **Command pool** (3 connections, configurable via `REMOTE_POOL_COMMAND_SIZE`): for `bash`, `glob`, `grep` execution via `exec()`
-- **File pool** (2 connections, configurable via `REMOTE_POOL_FILE_SIZE`): for SFTP file transfers via `sftp()`
-- Pool sizes are deliberately conservative for legacy SSH servers (e.g. OpenSSH 5.3) that struggle with concurrent handshakes.
-
-No external `ssh`, `sshpass`, or `rsync` binaries are required. Password authentication is handled natively by `ssh2`.
-
-### Tool Behaviors
-
-| Tool            | Strategy                                                                                                                                                                                                                      | Sync Trigger                                 |
-| :-------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------- |
-| `bash`        | SSH exec; stdout/stderr separated; SSH noise filtered; non-zero exit throws. Falls back to stderr heuristics when the remote shell reports an error but the exit code channel is not usable (rare, depends on ssh2 behavior). | none                                         |
-| `glob`        | SSH `rg --files --sortr=modified` (fallback: `find + stat + sort`)                                                                                                                                                        | none                                         |
-| `grep`        | SSH `rg --json` (fallback: `grep -rn`)                                                                                                                                                                                    | none                                         |
-| `read`        | Read local mirror; binary detection; BOM preserved                                                                                                                                                                            | `pullAll()` before read                    |
-| `write`       | Write local mirror; BOM preserved; unified diff preview in permission request                                                                                                                                                 | `pullAll()` if exists, `pushAll()` after |
-| `edit`        | Edit local mirror; 9 fallback replacers (full OpenCode native set); per-file lock; BOM preserved; unified diff preview                                                                                                        | `pullAll()` before, `pushAll()` after    |
-| `apply_patch` | Apply unified diff OR native OpenCode patch to local mirror; BOM preserved                                                                                                                                                    | `pullAll()` before, `pushAll()` after    |
-
-### Concurrency
-
-- `SyncEngine` uses a per-mirror mutex so only one SFTP operation runs at a time.
-- `edit` tool uses per-file promise locks so concurrent edits on the same file are serialized.
-- `SSHPool` queues SSH exec commands when all connections in the pool are busy.
-
-### Security
-
-- `PathMapper.isWithinWorkspace()` prevents `../` escapes before any filesystem or SSH operation.
-- `bash` tool arguments are passed directly to SSH without intermediate shell parsing when possible; if shell features are needed, we rely on the remote shell and escape user-controlled strings.
-- Remote file operations are bounded by the SSH user’s permissions; no privilege escalation.
-
-## Technology Stack
-
-- **Runtime**: Node.js / Bun (OpenCode runs on Bun; plugin uses standard `fs`, `child_process`)
-- **SSH**: `ssh2` (pure Node.js SSH library; bundled)
-- **Sync**: SFTP via `ssh2` (no external `rsync` required)
-- **Language**: TypeScript
-- **Schema**: Zod (matches `@opencode-ai/plugin` conventions)
-- **TUI Framework**: SolidJS via `@opentui/solid` (peer dependency; OpenCode provides at runtime)
-- **JSX**: Preserved (`"jsx": "preserve"` in tsconfig); OpenCode's bundler handles Solid JSX transform
-
-## Open Questions / TODOs
-
-1. **LSP for remote files**: Plugin tools cannot access OpenCode’s LSP service. Remote projects will not get LSP diagnostics. This is acceptable for the primary use case (legacy embedded systems) but may be revisited later via an LSP-over-SSH bridge.
-2. ~~Directory reads via `read`~~ **(FIXED)**: `read` now lists directories over SSH (`ls -1pA`) so the full remote directory contents are visible, regardless of the local mirror state.
-3. ~~Binary file handling~~ **(FIXED)**: `read` detects binary files by extension blacklist + content heuristic (null bytes or >30% non-printable chars in first 4KB).
-4. **Mirror wipe on init**: To avoid stale files from previous sessions confusing the AI, `index.ts` wipes the local mirror base (`rm -rf`) and resets the manifest on every plugin load. This trades caching efficiency for correctness. A future enhancement could implement selective cleanup (remove only files not in the new manifest) or manifest snapshot/restore for rollback.
-5. **Concurrent multi-session**: If two local OpenCode sessions target the same remote directory, their mirrors may conflict. The `edit` tool now has per-file locks to prevent concurrent edits on the same file within a single session. Cross-session conflicts still follow "last write wins" semantics.
-6. ~~SSH password auth~~ **(FIXED)**: Password auth is supported natively by `ssh2`. Provide `REMOTE_PASSWORD` env var and `ssh2` will authenticate without `sshpass`.
-7. **Windows remote targets**: The plugin is developed from a Windows host perspective. Remote Windows with OpenSSH should work for `bash` (PowerShell) but `glob`/`grep` may need remote `findstr` / `rg.exe` adjustments.
-
-## Build & Install
-
-### Prerequisites
-
-- [Bun](https://bun.sh) or Node.js >= 20
-- OpenCode >= 1.15.0
-
-### Build
-
-```bash
-bun install
-bun run build
-```
-
-### Install
-
-```bash
-# OpenCode plugins directory
-cp -r dist/ ~/.config/opencode/plugins/remote-code
-```
-
-### Usage with Launcher
-
-1. Copy `launchers/remote-opencode.sh` (or `.ps1`) to a location in your `$PATH`.
-2. Edit the "User Configuration" block inside the launcher with your `REMOTE_SSH`, `REMOTE_WORKDIR`, and `REMOTE_PASSWORD`.
-3. Run the launcher instead of `opencode` directly.
-
----
-
-## Build & Install (Legacy)
-
-
-```bash
-# Local development
-bun install
-bun run build
-
-# Install as OpenCode plugin
-cp -r dist/ ~/.config/opencode/plugins/remote-code
-```
-
-## Testing
-
-### Running Tests
-
-Tests require a live SSH target. Credentials are **never hardcoded** — they are read from `.env.test` (gitignored) or environment variables.
-
-```bash
-# 1. Copy the example config
-cp .env.test.example .env.test
-
-# 2. Edit .env.test with your target
-cat > .env.test << 'EOF'
-REMOTE_SSH=ssh user@your-host
-REMOTE_WORKDIR=/tmp/opencode-remote-test
-REMOTE_PASSWORD=your-password
-REMOTE_SUDO_PASSWORD=your-sudo-password
-EOF
-
-# 3. Run the test suites
-npx tsx src/test-e2e.ts        # 34 tests — full tool coverage
-npx tsx src/test-extended.ts   # 27 tests — strict assertions, BOM, diff, security
-```
-
-Both suites will fail early with a clear message if `REMOTE_SSH` is missing.
-
-### What Each Suite Covers
-
-| Suite                | Focus                                                                                                                                                                                                              |
-| :------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `test-e2e.ts`      | Connection pools, bash/glob/grep/read/write/edit/patch/sync/health — broad functional coverage                                                                                                                    |
-| `test-extended.ts` | BOM preservation, unified diff format, strict content matching, patch move,`isWithinWorkspace` boundary security, `quoteShell` injection safety, read pagination, glob brace expansion, edit replacer fallback |
-
-### Test Artifacts
-
-Temporary files created during debugging (e.g. `tmp_test_*.js`) should be placed in `tmp_test_artifacts/` (already gitignored via `tmp_*`).
+# OpenCode SSH Agent Notes
+
+## Commands
+
+- `npm run lint` runs the fast strict TypeScript check.
+- `npm run build` cleans `dist/`, compiles NodeNext ESM, and marks `dist/cli.js` executable.
+- `npm run test:unit` runs hermetic unit tests with fake SSH/SFTP processes.
+- `npm run test:integration` builds first and tests launcher lifecycle, plugin registration, and any installed real OpenCode loader without a network connection; the loader test skips only when `opencode` is absent.
+- `npm run test:smoke` builds, packs, installs into a temporary prefix, and checks the installed CLI; dependency installation may use the configured npm registry.
+- `npm test` builds and runs every default real-SSH-free Vitest suite. Timeout fixture tests are designed to pass in parallel and serial modes.
+- `npm run test:real` is the explicit opt-in real-SSH suite. It mutates its configured disposable target and requires the target to allow `sudo -n id -u`.
+- Manual TUI and fit testing is opt-in through `docs/upstream-fit-checklist.md`. Use only a separate non-production target and disposable directory.
+
+## Remote Session Safety
+
+- When this repository is launched through `opencode-ssh`, read and follow `opencode-ssh-remote-use/opencode-ssh-safety.md` in full before any project action, then call `remote_status` and verify the active target.
+- In an ordinary local checkout without an expected SSH session, the remote preflight does not apply. If an SSH session is expected but `remote_status` is absent, unhealthy, or inconsistent with the remote shell, stop.
+
+## Runtime Shape
+
+- `src/cli.ts` provides exactly `opencode-ssh <ssh-alias> <absolute-remote-workdir>`; it does not forward OpenCode arguments.
+- The launcher starts a system OpenSSH ControlMaster, resolves the canonical remote workdir, injects the package-root server plugin through `OPENCODE_CONFIG_CONTENT`, requires a nonce-protected ready handshake, and supervises cleanup.
+- `src/index.ts` is the server plugin entrypoint. It overrides `bash`, `glob`, `grep`, `read`, `write`, `edit`, and `apply_patch`, and adds `remote_status`.
+- Command tools use one-shot `ssh` channels through the owned socket. File tools use system `sftp` and a private launch-scoped mirror.
+- Slave SSH/SFTP processes fail closed when the master socket is unavailable. They do not open a replacement connection or retry commands.
+- `SyncEngine` uses operation-wide local transactions, per-file content baselines, deterministic remote lock directories, sibling temporary uploads, and atomic rename. It never pushes every manifest entry globally.
+- The system transform appends compact remote context and an optional bounded remote root `AGENTS.md`; it does not replace existing system entries.
+
+## Configuration And SSH
+
+- SSH aliases are passed unchanged to system OpenSSH, so `~/.ssh/config`, `known_hosts`, keys, `ssh-agent`, encrypted-key prompts, and `ProxyJump` remain authoritative.
+- Master startup disables account-password and keyboard-interactive fallback but allows host-key and private-key passphrase prompts. No password or sudo askpass support exists.
+- Activation requires the complete private launcher environment and matching plugin tuple `launchID`. Without it, the plugin is dormant.
+- Global OpenCode config, provider environment, plugins, and MCP remain available. Caller-directory project config is not discovered because OpenCode starts in a stable target-specific local workspace.
+- Stable session identity is based on the SHA-256 of alias plus canonical workdir. Mirrors are launch-specific and removed during launcher cleanup.
+
+## Permissions And Paths
+
+- Remote paths reject control characters and are canonicalized with remote `realpath -e` before access. Missing mutation paths canonicalize their nearest existing ancestor.
+- Canonical paths outside the configured workdir request `external_directory` permission. A workdir of `/` contains every absolute remote path.
+- `read`, `glob`, `grep`, `edit`, and `bash` use their corresponding OpenCode permission checks. Arbitrary paths embedded inside shell text cannot be inferred reliably and remain governed by the bash permission.
+- Each bash call is a separate POSIX `sh` process; `cd` does not persist.
+- SFTP operations run with the SSH user's privileges. Root-owned files require explicit reviewed `sudo -n` shell commands.
+- `apply_patch` add/update are supported. Delete and move are rejected until dedicated atomic implementations exist.
+
+## Implementation Traps
+
+- This is strict NodeNext ESM. TypeScript source imports local modules with `.js` suffixes.
+- Never use `shell: true`, interpolate aliases into local command strings, or automatically retry a command after spawn.
+- OpenSSH SFTP batch quoting differs from shell quoting. Keep glob characters escaped and reject CR/LF/NUL paths.
+- Remote lock directories fail closed when stale. Do not auto-delete an unknown lock during a mutation.
+- File conflicts are content-checked under cooperative plugin locks. Non-cooperating remote processes can still race after the final validation; never overstate this as a universal filesystem transaction.
+- The package requires Node.js 22.22.2+ and is tested against OpenCode 1.18.18. Other detected versions receive an advisory warning and a three-second pause before launch.
+- `package-lock.json` is tracked. Do not run `npm audit fix --force` or change pinned dependencies without reviewing the lock diff.
+- Never edit ignored `dist/` as source. Change `src/` or build scripts and run a full build.
+- Tracked examples and documentation must never contain connection details or credentials.
+- Dated implementation plans are historical records, not current instructions; use the source, tests, README, and security documentation as authoritative behavior.

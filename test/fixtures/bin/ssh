@@ -1,0 +1,162 @@
+#!/usr/bin/env node
+
+import { appendFileSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+
+const args = process.argv.slice(2)
+const logPath = process.env.FAKE_SSH_LOG
+if (logPath) appendFileSync(logPath, `${JSON.stringify(args)}\n`)
+
+const operation = valueAfter("-O")
+const socketFromFlag = valueAfter("-S")
+const socketFromOption = optionValue("ControlPath")
+
+if (args.includes("-MN")) {
+  if (!socketFromOption) process.exit(2)
+
+  const statePath = fakeStatePath(socketFromOption)
+  let readyTimer
+  const cleanup = (exitCode = 0) => {
+    if (readyTimer) clearTimeout(readyTimer)
+    removeOwnState(statePath)
+    process.exit(exitCode)
+  }
+  process.once("SIGTERM", () => cleanup(0))
+  process.once("SIGINT", () => cleanup(0))
+
+  const configuredExit = numberFromEnv("FAKE_SSH_MASTER_EXIT_CODE")
+  if (configuredExit !== undefined) {
+    setTimeout(() => cleanup(configuredExit), numberFromEnv("FAKE_SSH_MASTER_EXIT_DELAY_MS") ?? 0)
+  } else if (process.env.FAKE_SSH_NEVER_READY !== "1") {
+    readyTimer = setTimeout(() => {
+      const temporaryStatePath = `${statePath}.${process.pid}.tmp`
+      writeFileSync(temporaryStatePath, JSON.stringify({ pid: process.pid }))
+      renameSync(temporaryStatePath, statePath)
+    }, numberFromEnv("FAKE_SSH_READY_DELAY_MS") ?? 0)
+  }
+
+  setInterval(() => {}, 1_000)
+} else if (operation === "check") {
+  process.exit(liveMasterPid(socketFromFlag) === undefined ? 255 : 0)
+} else if (operation === "exit") {
+  const configuredExit = numberFromEnv("FAKE_SSH_EXIT_CODE")
+  if (configuredExit !== undefined && configuredExit !== 0) process.exit(configuredExit)
+
+  const pid = liveMasterPid(socketFromFlag)
+  if (pid === undefined) process.exit(255)
+  removeState(socketFromFlag)
+  try {
+    process.kill(pid, "SIGTERM")
+  } catch {
+    process.exit(255)
+  }
+  process.exit(0)
+} else if (args.includes("-G")) {
+  process.stdout.write(`hostname ${args.at(-1) ?? ""}\n`)
+} else {
+  const input = await readStdin()
+  if (process.env.FAKE_SSH_INPUT) writeFileSync(process.env.FAKE_SSH_INPUT, input)
+  if (process.env.FAKE_SSH_INPUT_LOG) {
+    appendFileSync(process.env.FAKE_SSH_INPUT_LOG, `${JSON.stringify(input)}\n`)
+  }
+
+  const delayMs = numberFromEnv("FAKE_SSH_COMMAND_DELAY_MS") ?? 0
+  if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+
+  const configuredChunks = chunksFromEnv()
+  if (configuredChunks) {
+    for (const chunk of configuredChunks) {
+      if (chunk.delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, chunk.delayMs))
+      }
+      const stream = chunk.stream === "stdout" ? process.stdout : process.stderr
+      stream.write(chunk.data)
+    }
+  }
+
+  if (process.env.FAKE_SSH_STDOUT) process.stdout.write(process.env.FAKE_SSH_STDOUT)
+  if (process.env.FAKE_SSH_STDERR) process.stderr.write(process.env.FAKE_SSH_STDERR)
+  process.exit(numberFromEnv("FAKE_SSH_EXIT_CODE") ?? 0)
+}
+
+function valueAfter(flag) {
+  const index = args.indexOf(flag)
+  return index === -1 ? undefined : args[index + 1]
+}
+
+function optionValue(name) {
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] === "-o" && args[index + 1].startsWith(`${name}=`)) {
+      return args[index + 1].slice(name.length + 1)
+    }
+  }
+  return undefined
+}
+
+function fakeStatePath(socketPath) {
+  return `${socketPath}.fake-ssh-master`
+}
+
+function liveMasterPid(socketPath) {
+  if (!socketPath) return undefined
+  try {
+    const state = JSON.parse(readFileSync(fakeStatePath(socketPath), "utf8"))
+    if (!Number.isSafeInteger(state.pid) || state.pid <= 0) return undefined
+    process.kill(state.pid, 0)
+    return state.pid
+  } catch {
+    removeState(socketPath)
+    return undefined
+  }
+}
+
+function removeOwnState(statePath) {
+  try {
+    const state = JSON.parse(readFileSync(statePath, "utf8"))
+    if (state.pid === process.pid) rmSync(statePath, { force: true })
+  } catch {
+    // The exit control operation may already have removed it.
+  }
+}
+
+function removeState(socketPath) {
+  if (socketPath) rmSync(fakeStatePath(socketPath), { force: true })
+}
+
+function numberFromEnv(name) {
+  const value = process.env[name]
+  if (value === undefined) return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function chunksFromEnv() {
+  const value = process.env.FAKE_SSH_CHUNKS
+  if (value === undefined) return undefined
+
+  const chunks = JSON.parse(value)
+  if (!Array.isArray(chunks)) throw new TypeError("FAKE_SSH_CHUNKS must be a JSON array")
+
+  for (const [index, chunk] of chunks.entries()) {
+    const validKeys = ["stream", "data", "delayMs"]
+    if (
+      chunk === null ||
+      typeof chunk !== "object" ||
+      Array.isArray(chunk) ||
+      Object.keys(chunk).some((key) => !validKeys.includes(key)) ||
+      (chunk.stream !== "stdout" && chunk.stream !== "stderr") ||
+      typeof chunk.data !== "string" ||
+      (chunk.delayMs !== undefined &&
+        (!Number.isFinite(chunk.delayMs) || chunk.delayMs < 0))
+    ) {
+      throw new TypeError(`FAKE_SSH_CHUNKS entry ${index} is invalid`)
+    }
+  }
+  return chunks
+}
+
+async function readStdin() {
+  process.stdin.setEncoding("utf8")
+  let input = ""
+  for await (const chunk of process.stdin) input += chunk
+  return input
+}

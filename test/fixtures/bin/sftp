@@ -1,0 +1,46 @@
+#!/usr/bin/env node
+
+import { appendFileSync, writeFileSync } from "node:fs"
+
+const args = process.argv.slice(2)
+const logPath = process.env.FAKE_SFTP_LOG
+if (logPath) appendFileSync(logPath, `${JSON.stringify(args)}\n`)
+
+const input = await readStdin()
+if (process.env.FAKE_SFTP_INPUT) writeFileSync(process.env.FAKE_SFTP_INPUT, input)
+if (process.env.FAKE_SFTP_INPUT_LOG) {
+  appendFileSync(process.env.FAKE_SFTP_INPUT_LOG, `${JSON.stringify(input)}\n`)
+}
+
+const expectedInput = process.env.FAKE_SFTP_EXPECT_INPUT
+if (expectedInput !== undefined && input !== expectedInput) {
+  process.stderr.write("unexpected SFTP batch input")
+  process.exit(2)
+}
+
+const commands = input.endsWith("\n") ? input.slice(0, -1).split("\n") : input.split("\n")
+if (commands.length !== 1 || !/^(get|put) /.test(commands[0])) {
+  process.stderr.write("fake sftp accepts exactly one get or put command")
+  process.exit(2)
+}
+
+const delayMs = numberFromEnv("FAKE_SFTP_DELAY_MS") ?? 0
+if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+
+if (process.env.FAKE_SFTP_STDOUT) process.stdout.write(process.env.FAKE_SFTP_STDOUT)
+if (process.env.FAKE_SFTP_STDERR) process.stderr.write(process.env.FAKE_SFTP_STDERR)
+process.exit(numberFromEnv("FAKE_SFTP_EXIT_CODE") ?? 0)
+
+async function readStdin() {
+  process.stdin.setEncoding("utf8")
+  let value = ""
+  for await (const chunk of process.stdin) value += chunk
+  return value
+}
+
+function numberFromEnv(name) {
+  const value = process.env[name]
+  if (value === undefined) return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}

@@ -1,12 +1,15 @@
 import fs from "fs/promises"
 import path from "path"
-import { tool } from "@opencode-ai/plugin"
+import { tool, type ToolContext, type ToolDefinition } from "@opencode-ai/plugin"
+import { createTwoFilesPatch, diffLines } from "diff"
 import type { RemoteConfig } from "../config.js"
+import { trimDiff } from "../diff-utils.js"
 import type { PathMapper } from "../path-mapper.js"
+import type { RemotePathResolver } from "../remote-path-resolver.js"
+import { remotePermissionPattern } from "../remote-path.js"
+import { assertValidRemotePath, normalizeRemotePath } from "../remote-path.js"
 import type { SyncEngine } from "../sync-engine.js"
-import type { SSHPool } from "../ssh-pool.js"
 import { readFileWithBom, joinBom } from "../bom.js"
-import { quoteShell } from "../shell-quote.js"
 
 // ========================================================================
 // Copied from OpenCode packages/opencode/src/patch/index.ts
@@ -25,6 +28,21 @@ export interface UpdateFileChunk {
   is_end_of_file?: boolean
 }
 
+interface PatchPlan {
+  kind: "add" | "update"
+  path: string
+  apply: (content: string) => string
+}
+
+interface PatchFileMetadata {
+  type: "add" | "update"
+  relativePath: string
+  filePath: string
+  patch: string
+  additions: number
+  deletions: number
+}
+
 function parsePatchHeader(
   lines: string[],
   startIdx: number,
@@ -32,22 +50,22 @@ function parsePatchHeader(
   const line = lines[startIdx]
 
   if (line.startsWith("*** Add File:")) {
-    const filePath = line.slice("*** Add File:".length).trim()
+    const filePath = parseNativeHeaderPath(line, "*** Add File:")
     return filePath ? { filePath, nextIdx: startIdx + 1 } : null
   }
 
   if (line.startsWith("*** Delete File:")) {
-    const filePath = line.slice("*** Delete File:".length).trim()
+    const filePath = parseNativeHeaderPath(line, "*** Delete File:")
     return filePath ? { filePath, nextIdx: startIdx + 1 } : null
   }
 
   if (line.startsWith("*** Update File:")) {
-    const filePath = line.slice("*** Update File:".length).trim()
+    const filePath = parseNativeHeaderPath(line, "*** Update File:")
     let movePath: string | undefined
     let nextIdx = startIdx + 1
 
     if (nextIdx < lines.length && lines[nextIdx].startsWith("*** Move to:")) {
-      movePath = lines[nextIdx].slice("*** Move to:".length).trim()
+      movePath = parseNativeHeaderPath(lines[nextIdx], "*** Move to:")
       nextIdx++
     }
 
@@ -55,6 +73,11 @@ function parsePatchHeader(
   }
 
   return null
+}
+
+function parseNativeHeaderPath(line: string, prefix: string): string {
+  const value = line.slice(prefix.length)
+  return trimAsciiSpaces(value.startsWith(" ") ? value.slice(1) : value)
 }
 
 function parseUpdateFileChunks(lines: string[], startIdx: number): { chunks: UpdateFileChunk[]; nextIdx: number } {
@@ -389,11 +412,11 @@ function parseUnifiedPatch(patchText: string): UnifiedDiffFile[] {
     const line = lines[i]
 
     if (line.startsWith("--- ")) {
-      const oldPath = line.slice(4).trim()
+      const oldPath = trimAsciiSpaces(line.slice(4))
       const nextLine = lines[i + 1] ?? ""
       let newPath: string | null = null
       if (nextLine.startsWith("+++ ")) {
-        newPath = nextLine.slice(4).trim()
+        newPath = trimAsciiSpaces(nextLine.slice(4))
         i++
       }
       current = {
@@ -521,8 +544,8 @@ export function createPatchTool(
   config: RemoteConfig,
   pathMapper: PathMapper,
   syncEngine: SyncEngine,
-  sshPool: SSHPool
-) {
+  pathResolver: RemotePathResolver
+): ToolDefinition {
   return tool({
     description: `Apply a patch to files on the remote machine.`,
     args: {
@@ -535,88 +558,171 @@ export function createPatchTool(
 
       const patchText = args.patchText.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
 
-      let files: Array<{ path: string; apply: (content: string) => string; moveFrom?: string }>
+      let files: PatchPlan[]
       if (patchText.includes("*** Begin Patch")) {
-        files = await parseAndPrepareNative(patchText, config, pathMapper, ctx)
+        files = await parseAndPrepareNative(patchText, config, pathResolver, ctx)
         if (files.length === 0) {
-          files = await parseAndPrepareUnified(patchText, config, pathMapper, ctx)
+          files = await parseAndPrepareUnified(patchText, config, pathResolver, ctx)
         }
       } else {
-        files = await parseAndPrepareUnified(patchText, config, pathMapper, ctx)
+        files = await parseAndPrepareUnified(patchText, config, pathResolver, ctx)
       }
 
       if (files.length === 0) {
         throw new Error("apply_patch verification failed: no file paths found in patch")
       }
 
-      const involvedPaths = new Set<string>()
-      for (const f of files) {
-        involvedPaths.add(f.path)
-        if (f.moveFrom) involvedPaths.add(f.moveFrom)
-      }
+      const involvedPaths = Array.from(new Set(files.map((file) => file.path))).sort()
 
-      for (const rp of involvedPaths) {
-        await syncEngine.register(rp)
-      }
-      await syncEngine.pullAll()
+      return syncEngine.transaction(async (transaction) => {
+        const planned = new Map<
+          string,
+          { existed: boolean; originalText: string; text: string; bom: boolean }
+        >()
 
-      for (const f of files) {
-        // For moves, read from the source path; otherwise read from the target path
-        const sourcePath = f.moveFrom ?? f.path
-        const localSourcePath = pathMapper.toLocal(sourcePath)
-        const { bom, text } = await readFileWithBom(fs, localSourcePath)
-        const newText = f.apply(text)
-        const localDestPath = pathMapper.toLocal(f.path)
-        await fs.mkdir(path.dirname(localDestPath), { recursive: true })
-        await fs.writeFile(localDestPath, joinBom(newText, bom), "utf-8")
-      }
-
-      await syncEngine.pushAll()
-
-      // Handle file moves: remote mv + local rename + manifest cleanup
-      for (const f of files) {
-        if (f.moveFrom) {
-          const fromLocal = pathMapper.toLocal(f.moveFrom)
-          const toLocal = pathMapper.toLocal(f.path)
-          // Remove remote source, then rename local mirror
-          await sshPool.exec(
-            `rm -f ${quoteShell(f.moveFrom)}`,
-            { timeout: 10_000 }
-          )
-          await fs.rename(fromLocal, toLocal).catch(() => {})
-          ;(syncEngine as any).manifest.remove(f.moveFrom)
+        for (const remotePath of involvedPaths) {
+          const existed = await transaction.pull(remotePath, ctx.abort)
+          const original = await readFileWithBom(fs, pathMapper.toLocal(remotePath))
+          planned.set(remotePath, {
+            existed,
+            originalText: original.text,
+            text: original.text,
+            bom: original.bom,
+          })
         }
-      }
 
-      return {
-        title: `Patched ${involvedPaths.size} file(s)`,
-        output: `Success. Updated the following files:\n${Array.from(involvedPaths).join("\n")}`,
-        metadata: {
-          files: Array.from(involvedPaths),
-        },
-      }
+        for (const file of files) {
+          const current = planned.get(file.path)
+          if (!current) throw new Error(`Missing patch baseline for ${file.path}`)
+          if (file.kind === "add" && current.existed) {
+            throw new Error(`Cannot add file because it already exists: ${file.path}`)
+          }
+          if (file.kind === "update" && !current.existed) {
+            throw new Error(`Cannot update missing file: ${file.path}`)
+          }
+        }
+
+        for (const file of files) {
+          const current = planned.get(file.path)
+          if (!current) throw new Error(`Missing patch baseline for ${file.path}`)
+          const next = readTextWithBom(file.apply(current.text))
+          current.text = next.text
+          current.bom = current.bom || next.bom
+        }
+
+        const fileMetadata: PatchFileMetadata[] = involvedPaths.map((remotePath) => {
+          const current = planned.get(remotePath)
+          if (!current) throw new Error(`Missing patch result for ${remotePath}`)
+          const patch = trimDiff(
+            createTwoFilesPatch(
+              current.existed ? remotePath : "/dev/null",
+              remotePath,
+              current.originalText,
+              current.text
+            )
+          )
+          const stats = countDiffStats(current.originalText, current.text)
+          return {
+            type: current.existed ? "update" : "add",
+            relativePath: path.posix.relative(pathMapper.remoteRoot, remotePath) || remotePath,
+            filePath: remotePath,
+            patch,
+            additions: stats.additions,
+            deletions: stats.deletions,
+          }
+        })
+        const diffPreview = fileMetadata.map((file) => file.patch).join("\n")
+
+        await ctx.ask({
+          permission: "edit",
+          patterns: involvedPaths.map((remotePath) =>
+            remotePermissionPattern(pathMapper.remoteRoot, remotePath)
+          ),
+          always: involvedPaths.map((remotePath) =>
+            remotePermissionPattern(pathMapper.remoteRoot, remotePath)
+          ),
+          metadata: {
+            diff: diffPreview,
+            executor: "ssh",
+            filepath: involvedPaths.join(", "),
+            files: fileMetadata,
+            remotePaths: involvedPaths,
+          },
+        })
+
+        for (const remotePath of involvedPaths) {
+          const current = planned.get(remotePath)
+          if (!current) throw new Error(`Missing patch result for ${remotePath}`)
+          const localPath = pathMapper.toLocal(remotePath)
+          await fs.mkdir(path.dirname(localPath), { recursive: true })
+          await fs.writeFile(localPath, joinBom(current.text, current.bom), "utf-8")
+        }
+
+        await transaction.pushMany(involvedPaths, ctx.abort)
+
+        return {
+          title: `Patched ${involvedPaths.length} file(s)`,
+          output: `Success. Updated the following files:\n${involvedPaths.join("\n")}`,
+          metadata: {
+            diff: diffPreview,
+            executor: "ssh",
+            files: fileMetadata,
+            remotePaths: involvedPaths,
+          },
+        }
+      })
     },
   })
+}
+
+function countDiffStats(oldText: string, newText: string): { additions: number; deletions: number } {
+  let additions = 0
+  let deletions = 0
+  for (const change of diffLines(oldText, newText)) {
+    if (change.added) additions += change.count || 0
+    if (change.removed) deletions += change.count || 0
+  }
+  return { additions, deletions }
 }
 
 async function parseAndPrepareUnified(
   patchText: string,
   config: RemoteConfig,
-  pathMapper: PathMapper,
-  ctx: any
-): Promise<Array<{ path: string; apply: (content: string) => string }>> {
+  pathResolver: RemotePathResolver,
+  ctx: ToolContext
+): Promise<PatchPlan[]> {
   const parsed = parseUnifiedPatch(patchText)
-  const result: Array<{ path: string; apply: (content: string) => string }> = []
+  const result: PatchPlan[] = []
+
+  for (const file of parsed) {
+    if (file.isDeleted) {
+      throw new Error(
+        "apply_patch deletion is disabled until remote atomic delete support is implemented; use an explicit bash rm command"
+      )
+    }
+    const oldRemotePath = file.oldPath
+      ? normalizePatchPath(file.oldPath, config.remoteWorkdir, true)
+      : undefined
+    const newRemotePath = file.newPath
+      ? normalizePatchPath(file.newPath, config.remoteWorkdir, true)
+      : undefined
+    if (oldRemotePath && newRemotePath && oldRemotePath !== newRemotePath) {
+      throw new Error(
+        "apply_patch move is disabled until remote atomic move support is implemented; use an explicit bash mv command"
+      )
+    }
+  }
 
   for (const file of parsed) {
     const targetPath = file.newPath ?? file.oldPath
     if (!targetPath) continue
-    const rp = normalizePatchPath(targetPath, config.remoteWorkdir)
-    if (!pathMapper.isWithinWorkspace(rp)) {
-      await ctx.ask({ permission: "edit", patterns: [rp], always: [rp], metadata: { diff: patchText.slice(0, 2000) } })
-    }
+    const rp = await pathResolver.resolveMutation(
+      normalizePatchPath(targetPath, config.remoteWorkdir, true),
+      ctx
+    )
     const hasNoNewlineMarker = detectNoNewlineAtEnd(file.hunks)
     result.push({
+      kind: file.isNew ? "add" : "update",
       path: rp,
       apply: (content) => applyUnifiedDiff(content, file.hunks, hasNoNewlineMarker),
     })
@@ -628,61 +734,68 @@ async function parseAndPrepareUnified(
 async function parseAndPrepareNative(
   patchText: string,
   config: RemoteConfig,
-  pathMapper: PathMapper,
-  ctx: any
-): Promise<Array<{ path: string; apply: (content: string) => string; moveFrom?: string }>> {
+  pathResolver: RemotePathResolver,
+  ctx: ToolContext
+): Promise<PatchPlan[]> {
   const hunks = parsePatch(patchText).hunks
-  const result: Array<{ path: string; apply: (content: string) => string; moveFrom?: string }> = []
+  const result: PatchPlan[] = []
 
   for (const hunk of hunks) {
-    const rp = normalizePatchPath(hunk.path, config.remoteWorkdir)
-    if (!pathMapper.isWithinWorkspace(rp)) {
-      await ctx.ask({ permission: "edit", patterns: [rp], always: [rp], metadata: { diff: patchText.slice(0, 2000) } })
+    if (hunk.type === "delete") {
+      throw new Error(
+        "apply_patch deletion is disabled until remote atomic delete support is implemented; use an explicit bash rm command"
+      )
     }
+    if (hunk.type === "update" && hunk.move_path !== undefined) {
+      throw new Error(
+        "apply_patch move is disabled until remote atomic move support is implemented; use an explicit bash mv command"
+      )
+    }
+  }
 
+  for (const hunk of hunks) {
+    const rp = await pathResolver.resolveMutation(
+      normalizePatchPath(hunk.path, config.remoteWorkdir),
+      ctx
+    )
     if (hunk.type === "add") {
       result.push({
+        kind: "add",
         path: rp,
         apply: () => hunk.contents ?? "",
       })
-    } else if (hunk.type === "delete") {
-      result.push({
-        path: rp,
-        apply: () => "",
-      })
     } else if (hunk.type === "update" && hunk.chunks) {
       const chunks = hunk.chunks
-      const movePath = hunk.move_path
-        ? normalizePatchPath(hunk.move_path, config.remoteWorkdir)
-        : undefined
-      if (movePath) {
-        result.push({
-          path: movePath,
-          apply: (content) => deriveNewContentsFromChunks(movePath, chunks, content).content,
-          moveFrom: rp,
-        })
-      } else {
-        result.push({
-          path: rp,
-          apply: (content) => deriveNewContentsFromChunks(rp, chunks, content).content,
-        })
-      }
+      result.push({
+        kind: "update",
+        path: rp,
+        apply: (content) => deriveNewContentsFromChunks(rp, chunks, content).content,
+      })
     }
   }
 
   return result
 }
 
-function normalizePatchPath(raw: string, remoteWorkdir: string): string {
-  let p = raw.trim()
-  if (p === "/dev/null") return p
+function normalizePatchPath(
+  raw: string,
+  remoteWorkdir: string,
+  hasUnifiedMetadata = false
+): string {
+  let p = raw
+  if (hasUnifiedMetadata) {
+    const tabIdx = p.indexOf("\t")
+    if (tabIdx >= 0) p = p.slice(0, tabIdx)
+  }
+  p = trimAsciiSpaces(p)
+  assertValidRemotePath(p, "apply_patch path")
   if (p.startsWith("a/") || p.startsWith("b/")) {
     p = p.slice(2)
   }
-  const tabIdx = p.indexOf("\t")
-  if (tabIdx >= 0) p = p.slice(0, tabIdx)
-  if (!p.startsWith("/")) {
-    p = path.posix.join(remoteWorkdir, p)
-  }
-  return path.posix.normalize(p)
+  if (!p) throw new Error("apply_patch path is empty")
+  return normalizeRemotePath(remoteWorkdir, p)
+}
+
+function trimAsciiSpaces(value: string): string {
+  return value.replace(/^ +| +$/g, "")
 }

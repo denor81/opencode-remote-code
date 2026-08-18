@@ -1,32 +1,12 @@
 import fs from "fs/promises"
-import path from "path"
-import { tool } from "@opencode-ai/plugin"
+import { tool, type ToolDefinition } from "@opencode-ai/plugin"
 import { createTwoFilesPatch, diffLines } from "diff"
 import type { PathMapper } from "../path-mapper.js"
+import type { RemotePathResolver } from "../remote-path-resolver.js"
+import { remotePermissionPattern } from "../remote-path.js"
 import type { SyncEngine } from "../sync-engine.js"
 import { readFileWithBom, joinBom, splitBom } from "../bom.js"
 import { trimDiff } from "../diff-utils.js"
-
-// ========================================================================
-// Per-file edit locks
-// ========================================================================
-const fileLocks = new Map<string, Promise<void>>()
-
-async function withFileLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
-  const previous = fileLocks.get(filePath)
-  const current = (async () => {
-    if (previous) await previous
-    return fn()
-  })()
-  fileLocks.set(filePath, current.then(() => {}, () => {}))
-  try {
-    return await current
-  } finally {
-    if (fileLocks.get(filePath) === current) {
-      fileLocks.delete(filePath)
-    }
-  }
-}
 
 // ========================================================================
 // Line ending helpers
@@ -45,12 +25,11 @@ function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string {
 }
 
 // ====================================================================
-// Local processing layer — ported from OpenCode 1.15.6 edit.ts
-// (removed Effect framework; replaced replaceAll to avoid $-meta bug)
+// Local processing layer ported from OpenCode 1.18.18 edit.ts.
 // ====================================================================
 
-const SINGLE_CANDIDATE_SIMILARITY_THRESHOLD = 0.0
-const MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD = 0.3
+const SINGLE_CANDIDATE_SIMILARITY_THRESHOLD = 0.65
+const MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD = 0.65
 
 function* simpleReplacer(_content: string, find: string): Generator<string> {
   yield find
@@ -114,7 +93,10 @@ function* blockAnchorReplacer(content: string, find: string): Generator<string> 
     if (originalLines[i].trim() !== firstLineSearch) continue
     for (let j = i + 2; j < originalLines.length; j++) {
       if (originalLines[j].trim() === lastLineSearch) {
-        candidates.push({ startLine: i, endLine: j })
+        const actualBlockSize = j - i + 1
+        if (actualBlockSize === searchBlockSize) {
+          candidates.push({ startLine: i, endLine: j })
+        }
         break
       }
     }
@@ -307,17 +289,16 @@ function* contextAwareReplacer(content: string, find: string): Generator<string>
         const blockLines = contentLines.slice(i, j + 1)
         const block = blockLines.join("\n")
         if (blockLines.length === findLines.length) {
-          let matchingLines = 0
-          let totalNonEmptyLines = 0
+          let allComparedLinesMatch = true
           for (let k = 1; k < blockLines.length - 1; k++) {
             const blockLine = blockLines[k].trim()
             const findLine = findLines[k].trim()
-            if (blockLine.length > 0 || findLine.length > 0) {
-              totalNonEmptyLines++
-              if (blockLine === findLine) matchingLines++
+            if ((blockLine.length > 0 || findLine.length > 0) && blockLine !== findLine) {
+              allComparedLinesMatch = false
+              break
             }
           }
-          if (totalNonEmptyLines === 0 || matchingLines / totalNonEmptyLines >= 0.5) {
+          if (allComparedLinesMatch) {
             yield block
             break
           }
@@ -328,7 +309,7 @@ function* contextAwareReplacer(content: string, find: string): Generator<string>
   }
 }
 
-function replaceContent(
+export function replaceContent(
   content: string,
   oldString: string,
   newString: string,
@@ -357,6 +338,11 @@ function replaceContent(
       const index = content.indexOf(search)
       if (index === -1) continue
       notFound = false
+      if (isDisproportionateMatch(search, oldString)) {
+        throw new Error(
+          "Refusing replacement because the matched span is much larger than oldString. Re-read the file and provide the full exact oldString for the intended replacement."
+        )
+      }
       if (replaceAll) {
         // Manual replacement to avoid String.replaceAll's $-meta-character semantics
         let result = content
@@ -383,6 +369,17 @@ function replaceContent(
   )
 }
 
+function isDisproportionateMatch(search: string, oldString: string): boolean {
+  const oldLines = oldString.split("\n").length
+  const searchLines = search.split("\n").length
+  if (searchLines >= Math.max(oldLines + 3, oldLines * 2)) return true
+  if (oldLines === 1) return false
+  return search.trim().length > Math.max(
+    oldString.trim().length + 500,
+    oldString.trim().length * 4
+  )
+}
+
 function countDiffStats(oldText: string, newText: string): { additions: number; deletions: number } {
   let additions = 0
   let deletions = 0
@@ -397,7 +394,11 @@ function countDiffStats(oldText: string, newText: string): { additions: number; 
 // Tool definition
 // ========================================================================
 
-export function createEditTool(pathMapper: PathMapper, syncEngine: SyncEngine) {
+export function createEditTool(
+  pathMapper: PathMapper,
+  syncEngine: SyncEngine,
+  pathResolver: RemotePathResolver
+): ToolDefinition {
   return tool({
     description: `Make precise text replacements in a remote file.`,
     args: {
@@ -411,35 +412,20 @@ export function createEditTool(pathMapper: PathMapper, syncEngine: SyncEngine) {
         throw new Error("No changes to apply: oldString and newString are identical.")
       }
 
-      let remotePath = path.posix.normalize(args.filePath)
-      if (!path.posix.isAbsolute(remotePath)) {
-        remotePath = path.posix.join(pathMapper.remoteRoot, remotePath)
-      }
-      if (!pathMapper.isWithinWorkspace(remotePath)) {
-        await ctx.ask({
-          permission: "edit",
-          patterns: [remotePath],
-          always: [remotePath],
-          metadata: {},
-        })
-      }
+      const remotePath = await pathResolver.resolveMutation(args.filePath, ctx)
 
       const localPath = pathMapper.toLocal(remotePath)
 
-      return withFileLock(localPath, async () => {
-        // Track, pull, edit, push
-        await syncEngine.register(remotePath)
-        await syncEngine.pullAll()
+      return syncEngine.transaction(async (transaction) => {
+        const existed = await transaction.pull(remotePath, ctx.abort)
 
         let content = ""
         let bom = false
-        let existed = false
-        try {
+        if (existed) {
           const existing = await readFileWithBom(fs, localPath)
           content = existing.text
           bom = existing.bom
-          existed = true
-        } catch {}
+        }
 
         if (!existed && args.oldString !== "") {
           throw new Error(`File ${remotePath} not found`)
@@ -455,15 +441,15 @@ export function createEditTool(pathMapper: PathMapper, syncEngine: SyncEngine) {
         const diffPreview = generateDiffPreview(remotePath, content, result)
         await ctx.ask({
           permission: "edit",
-          patterns: [remotePath],
-          always: [remotePath],
-          metadata: { diff: diffPreview },
+          patterns: [remotePermissionPattern(pathMapper.remoteRoot, remotePath)],
+          always: [remotePermissionPattern(pathMapper.remoteRoot, remotePath)],
+          metadata: { diff: diffPreview, executor: "ssh", remotePath },
         })
 
         const next = splitBom(result)
         const desiredBom = bom || next.bom
         await fs.writeFile(localPath, joinBom(result, desiredBom), "utf-8")
-        await syncEngine.pushAll()
+        await transaction.push(remotePath, ctx.abort)
 
         const stats = countDiffStats(content, result)
 

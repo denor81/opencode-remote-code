@@ -1,272 +1,203 @@
-# 🌐 Remote Code
+# OpenCode SSH
 
-[中文](README.zh-CN.md)
+Run OpenCode and its TUI locally while the normal project tools operate on a
+remote machine through system OpenSSH. The remote host needs no OpenCode,
+Node.js, plugin, or agent installation.
 
-An OpenCode plugin that lets AI agents operate remote machines over SSH — with **zero footprint** on the remote side. The remote machine only needs `sshd`; no agent, runtime, or dependency installation is required.
-
-The AI sees nothing different: it still calls `bash`, `edit`, `write`, `read`, `glob`, `grep`, and `apply_patch` exactly as it would locally.
-
----
-
-## 💡 Why Remote Code?
-
-I am an analog IC engineer. My daily work relies on the **Cadence IC6.1.7 design suite**, which runs on an aging **CentOS 6 VM**. The glibc version on CentOS 6 is too old to install any modern agent tools — Node.js, Python 3.11+, and most modern CLI tools simply won't run.
-
-I need to use OpenCode on my local Windows host to control that VM — automating design flows, batch-modifying schematic parameters, running simulation scripts. **Remote Code** makes this possible: the AI thinks it is operating local files, but every command actually executes on that ancient VM.
-
-![pic](pic.png)
-
-**Not a single file needs to be touched on the VM — only the SSH service must be running.**
-
-| Scenario                      | Pain Point                               | Remote Code Solution            |
-| :---------------------------- | :--------------------------------------- | :------------------------------ |
-| Legacy VMs (CentOS 6, RHEL 5) | Cannot install modern agents             | Only needs SSH                  |
-| Production servers            | Strict compliance, no installs           | Leaves no trace on remote       |
-| Embedded / edge devices       | No package manager, resource constrained | All logic runs locally          |
-| Remote Windows hosts          | Just install OpenSSH                     | Single entry point              |
-| Ephemeral containers          | Don't want repeated setup                | Connect on demand, zero residue |
-
----
-
-## 🔌 Standalone MCP Server
-
-This repository is the **OpenCode plugin** version:
-<https://github.com/zz6zz666/opencode-remote-code>
-
-There is also a standalone MCP server version planned for the same GitHub
-account:
-<https://github.com/zz6zz666/mcp-remote-code>
-
-The two projects share the same zero-footprint SSH motivation, but target
-different workflows:
-
-- **OpenCode plugin**: tightly integrated with OpenCode. It overrides native
-  tools so the remote machine is fully masqueraded as the agent workspace. The
-  runtime environment is remote, and local directories are intentionally not
-  part of the agent's normal view.
-- **MCP server**: exposes namespaced `remote_*` tools to any MCP client. Local
-  and remote work can coexist, so an agent can keep local design notes or lookup
-  tables while running remote commands, edits, patches, pulls, pushes, and
-  simulations on the SSH target.
-
----
-
-## 📋 Prerequisites
-
-- **OpenCode** (latest version)
-- **SSH daemon** on the remote machine (the *only* remote requirement)
-
-> **Note**:  This plugin uses the pure-Node.js `ssh2` library internally. You **do not** need to install `ssh`, `sshpass`, or `rsync` locally.
-
----
-
-## 🚀 Installation
-
-This plugin has external dependencies and requires a build step, so it **must** be installed from source.
+Tested against OpenCode 1.18.18. Other versions are allowed with an advisory
+warning and should be validated with the manual TUI checks before use.
 
 ```bash
-# 1. Download or clone
-git clone https://github.com/zz6zz666/opencode-remote-code.git
+opencode-ssh staging /srv/app
+opencode-ssh staging /
+```
 
-# 2. Install dependencies and build
-cd opencode-remote-code
-npm install
+The launcher passes `staging` unchanged to `ssh` and `sftp`. OpenSSH remains
+responsible for `~/.ssh/config`, keys, `ssh-agent`, host verification,
+`ProxyJump`, and connection algorithms.
+
+## Requirements
+
+- Node.js 22.22.2 or newer.
+- OpenCode installed locally. Version 1.18.18 is the tested baseline.
+- Linux or macOS locally. Windows users should run the launcher in WSL.
+- System `ssh` and `sftp` clients.
+- A Linux SSH target with SFTP, POSIX `sh`, and `realpath`/`pwd -P` behavior.
+
+## Install
+
+```bash
+npm ci
 npm run build
+npm install -g .
 ```
 
-After building, choose one of the following:
+The final command installs the `opencode-ssh` executable from this checkout.
+Rebuild and reinstall after source changes. See the complete
+[installation and usage guide](docs/installation-and-usage.md) for OpenCode
+installation, SSH setup, a fixed-target local script, project safety
+instructions, and first-launch verification.
 
-### Option A: Copy to OpenCode plugin directory (recommended)
+## SSH Configuration
 
-Copy the built plugin into OpenCode's plugin directory so you can delete the original download:
+Configure and verify the target with ordinary OpenSSH first:
+
+```sshconfig
+Host staging
+    HostName staging.example.invalid
+    User deploy
+    IdentityFile ~/.ssh/id_ed25519
+```
 
 ```bash
-# Linux/macOS:
-cp -r . ~/.config/opencode/plugins/remote-code
-
-# Windows (PowerShell):
-Copy-Item -Recurse -Force . $env:USERPROFILE\.config\opencode\plugins\remote-code
+ssh staging
+ssh staging 'pwd -P'
 ```
 
-> OpenCode loads local plugins from `~/.config/opencode/plugins/` (global) or `.opencode/plugins/` (project-level). The directory must contain `package.json` and the built `dist/` folder.
+The launcher disables SSH account-password and keyboard-interactive fallback.
+It does not use `BatchMode`, so OpenSSH may still ask for host-key confirmation
+or a private-key passphrase. When the key is loaded in `ssh-agent`, the launcher
+inherits `SSH_AUTH_SOCK` and normally asks nothing.
 
-### Option B: Reference the source directly (for development)
+## Usage
 
-Keep the plugin in place and point OpenCode at it:
+The command accepts exactly an SSH alias and an absolute remote workdir:
 
-```json
-{
-  "plugin": ["/absolute/path/to/opencode-remote-code"]
-}
+```bash
+opencode-ssh <ssh-alias> <absolute-remote-workdir>
 ```
 
-Use `npm run dev` for watch-mode builds during development.
+There is no OpenCode argument forwarding. Model, provider, permission, plugin,
+and MCP settings come from the normal OpenCode configuration.
 
----
+Before SSH startup, the launcher queries the selected local `opencode` binary.
+Version 1.18.18 continues immediately. A different or unidentifiable version
+prints an advisory warning, waits three seconds so it can be reviewed or
+cancelled, and then continues. The warning is not a compatibility failure; run
+the documented manual TUI checks before relying on the new version.
 
-## 🎯 Usage
+Global configuration under `~/.config/opencode` and absolute explicit config
+paths are preserved. Caller-directory project config (`opencode.json` or
+`.opencode/`) is intentionally not discovered because OpenCode starts in the
+stable launcher workspace rather than the directory where the command was
+typed. Put settings needed by remote sessions in global config or an absolute
+`OPENCODE_CONFIG` file. The remote root `AGENTS.md`, when present, is appended
+to the system context.
 
-Remote mode is activated **exclusively via environment variables**. OpenCode's CLI does not recognize `--remote*` flags, and plugin options in `opencode.json` are unreliable due to internal caching.
+For safe remote operation, add the packaged
+[`opencode-ssh-safety.md`](opencode-ssh-remote-use/opencode-ssh-safety.md) to the
+target project and explicitly require the project root `AGENTS.md` to read and
+follow it. No nested `AGENTS.md` is needed. The installation guide contains the
+generic integration snippet and optional mutation-scope behavior.
 
-### Launcher scripts
+The remote workdir is the initial project root and stable session identity. It
+is not a chroot:
 
-The `launchers/` directory contains ready-made launcher scripts for all major platforms. **We strongly recommend using them** because they solve a session persistence problem: OpenCode binds sessions to the current working directory, so if you launch it from different local folders, your remote sessions appear to "disappear." The launchers automatically derive a stable local session directory from your remote target, ensuring sessions persist no matter where you invoke the script from.
+- File tools request `external_directory` permission for direct paths outside
+  the workdir.
+- An explicit external `bash.workdir` requests the same permission.
+- Arbitrary shell text such as `cd /etc && ...` is governed by the normal
+  `bash` permission because shell paths cannot be parsed reliably.
+- Each bash call is independent, so `cd` does not persist.
+- `/` is valid and makes the entire remote filesystem the project scope.
 
-1. Copy the appropriate launcher for your platform to a location in your `$PATH` (or keep it anywhere convenient):
+All operations still run with the SSH user's Unix permissions. Use explicit
+`sudo -n` shell commands for administration. SFTP-backed `read`, `write`,
+`edit`, and `apply_patch` do not become root through sudo.
 
-   ```bash
-   # Linux / macOS
-   cp launchers/remote-opencode.sh ~/bin/remote-opencode
-   chmod +x ~/bin/remote-opencode
+## Remote Tools
 
-   # Windows PowerShell
-   Copy-Item launchers\remote-opencode.ps1 $env:USERPROFILE\bin\remote-opencode.ps1
+The plugin overrides these familiar OpenCode tools:
 
-   # Windows CMD
-   copy launchers\remote-opencode.bat %USERPROFILE%\bin\remote-opencode.bat
-   ```
+| Tool | Execution |
+| --- | --- |
+| `bash` | One-shot POSIX `sh` command through the OpenSSH ControlMaster |
+| `glob`, `grep` | Remote command through the ControlMaster |
+| `read`, `write`, `edit`, `apply_patch` | Private local mirror plus system SFTP |
+| `remote_status` | Target and ControlMaster health diagnostics |
 
-2. Edit the **"User Configuration"** block inside the launcher with your `REMOTE_SSH`, `REMOTE_WORKDIR`, and optional credentials.
+Other tools, plugins, MCP servers, LSPs, formatters, provider traffic, and TUI
+internals remain local. This package is not a sandbox and does not guarantee
+that every OpenCode operation is remote.
 
-3. Run the launcher instead of `opencode` directly:
+### Live Bash Output
 
-   ```bash
-   remote-opencode
-   ```
+The implementation publishes incremental stdout and stderr from agent calls to
+the SSH-backed `bash` tool to the existing OpenCode Bash card contract while the
+command runs. Automated publication and settlement tests pass. Manual fit
+testing on the pinned OpenCode 1.18.18 TUI confirmed incremental rendering and
+retained output across success, failure, timeout, cancellation, and overflow;
+see the [fit report](docs/upstream-fit-report.md).
 
-The launcher will:
-- Automatically create and `cd` into a stable local session directory (e.g. `~/.opencode/remote-sessions/host_home_project/`)
-- Export the required environment variables
-- Launch OpenCode from that stable directory
+The published preview is a replacement tail, not a full transcript: it retains
+the latest 30,000 characters and includes a truncation marker after older
+preview text is removed. The final model-facing capture is independent, remains
+limited to 1 MiB per stream, and can be further truncated by OpenCode.
 
-You can also uncomment the optional **SSH connection pool tuning** variables in the launcher if you need to adjust concurrency for legacy SSH servers.
+Manual shell commands entered in the TUI with a leading `!` remain local and
+are unrelated to this feature. The remote Bash tool provides no PTY or
+interactive stdin. A
+program that block-buffers output because it sees a pipe will not become live
+automatically; use a program-supported unbuffered mode when appropriate.
 
-### Configuration options
+Timeout or cancellation can leave remote descendants alive. Visible partial
+output does not authorize an automatic retry; inspect remote state first.
 
-| Environment Variable       | Description                                                             | Default                  |
-| :------------------------- | :---------------------------------------------------------------------- | :----------------------- |
-| `REMOTE_SSH`             | Full SSH connection string (exactly as you would type in your terminal) | *(required)*           |
-| `REMOTE_WORKDIR`         | Remote working directory (absolute path)                                | *(required)*           |
-| `REMOTE_MIRROR`          | Local mirror root directory                                             | `~/.opencode/mirrors/` |
-| `REMOTE_PASSWORD`        | SSH login password                                                      | *(optional)*           |
-| `REMOTE_SUDO_PASSWORD`   | Sudo password for remote commands                                       | *(optional)*           |
-| `REMOTE_POOL_COMMAND_SIZE` | SSH exec connection pool size (`bash`/`glob`/`grep`)                  | `3`                    |
-| `REMOTE_POOL_FILE_SIZE`  | SFTP connection pool size (`read`/`write`/`edit`/`patch`)             | `2`                    |
-| `REMOTE_POOL_STAGGER_MS` | Delay between sequential SSH handshakes (ms) for legacy servers       | `0`                    |
+## Lifecycle
 
-If `REMOTE_SSH` is not set, the plugin stays dormant and OpenCode runs normally in local mode.
+The launcher:
 
-### Authentication examples
+1. Checks the local OpenCode version and warns without blocking an untested one.
+2. Starts a private OpenSSH ControlMaster for the alias.
+3. Resolves the canonical remote workdir.
+4. Creates a stable local OpenCode session directory from the alias and workdir.
+5. Adds this plugin to `OPENCODE_CONFIG_CONTENT` for the child process only.
+6. Starts the ordinary local OpenCode TUI without modifying global config.
+7. Requires a nonce-protected plugin-ready handshake.
+8. Closes OpenCode, the ControlMaster, socket, and ready file on exit.
 
-**Key-based auth (recommended):**
+Runtime data is private to the local user:
 
-```bat
-set "REMOTE_SSH=ssh -i C:\Users\me\.ssh\id_rsa user@host"
-set "REMOTE_WORKDIR=/home/project"
+```text
+${XDG_STATE_HOME:-~/.local/state}/opencode-ssh/<target-id>/
+${XDG_CACHE_HOME:-~/.cache}/opencode-ssh/<target-id>/
+${XDG_RUNTIME_DIR:-/tmp}/opencode-ssh-<uid>/
 ```
 
-**Password auth:**
+## Testing
 
-```bat
-set "REMOTE_SSH=ssh user@host"
-set "REMOTE_WORKDIR=/home/project"
-set "REMOTE_PASSWORD=mypassword"
+```bash
+npm run lint
+npm run build
+npm run test:unit
+npm run test:integration
+npm run test:smoke
+npm pack --dry-run
 ```
 
-**Sudo commands:**
+Use a separate non-production SSH target for manual mutation tests. Legacy
+destructive real-host suites have been removed; the opt-in checklist is kept
+separate from the default real-SSH-free tests in
+[`docs/upstream-fit-checklist.md`](docs/upstream-fit-checklist.md).
+The actual-loader integration test runs with any installed OpenCode version and
+skips only when no `opencode` executable exists. Terminal rendering still
+requires the five short human-observed checks in the
+[installation guide](docs/installation-and-usage.md#manual-tui-checks).
 
-```bat
-set "REMOTE_SSH=ssh user@host"
-set "REMOTE_WORKDIR=/app"
-set "REMOTE_PASSWORD=mypassword"
-set "REMOTE_SUDO_PASSWORD=mysudopass"
-```
+## Current Trial Limitations
 
-The AI can then use `sudo` naturally in `bash` commands without interactive prompts.
+- File transfers are full-file rather than delta-based.
+- Per-file content conflicts are detected before upload, and replacement uses a
+  same-directory temporary file plus atomic rename. A multi-file patch can
+  still be partially committed if transport fails after its conflict preflight.
+- `apply_patch` delete and move operations are rejected until atomic remote
+  delete/move support is implemented. Use explicit reviewed shell commands.
+- Cancellation closes the local SSH channel; remote descendants may survive.
+- Mirrors are launch-scoped; concurrent launchers do not share local files.
 
----
+See [SECURITY.md](SECURITY.md) for the exact boundary.
 
-## ⚙️ How It Works
+## Upstream And License
 
-### 1. Local Mirror
-
-Only files the AI actually touches are mirrored locally. The mirror is kept at:
-
-```
-~/.opencode/mirrors/
-└── user_host/
-    └── home_project/
-        ├── manifest.json          # tracked file list
-        └── home/project/          # mirrored directory tree
-            └── src/
-                └── main.ts
-```
-
-### 2. Path Mapping
-
-All paths visible to the AI are **remote absolute paths**. The plugin translates them transparently:
-
-```
-AI sees:     /home/project/src/main.ts
-Local path:  ~/.opencode/mirrors/user_host/home_project/home/project/src/main.ts
-```
-
-### 3. Sync Engine
-
-File-editing tools (`read`, `write`, `edit`, `apply_patch`) operate on the local mirror and sync via SFTP over persistent SSH connections:
-
-- **Before** a file edit → `pullAll()` ensures the local mirror is up to date
-- **After** a file edit → `pushAll()` uploads changes to the remote
-
-Command tools (`bash`, `glob`, `grep`) run directly on the remote via SSH.
-
-### 4. SSH Architecture
-
-The plugin uses the `ssh2` library to maintain connection pools:
-
-- **Command pool** (5 connections): for `bash`, `glob`, `grep` execution
-- **File pool** (3 connections): for SFTP file transfers
-
-No external `ssh`, `sshpass`, or `rsync` binaries are required.
-
----
-
-## 📊 Tool Behavior Matrix
-
-| Tool            | Where it runs | Sync                       | Notes                                                                |
-| :-------------- | :------------ | :------------------------- | :------------------------------------------------------------------- |
-| `bash`        | Remote SSH    | none                       | Direct shell forwarding                                              |
-| `glob`        | Remote SSH    | none                       | Remote `rg --files --sortr=modified` (fallback to `find + stat`) |
-| `grep`        | Remote SSH    | none                       | Remote `rg --json` (fallback to `grep -rn`)                      |
-| `read`        | Local mirror  | pull before                | Reads from synced mirror                                             |
-| `write`       | Local mirror  | pull if exists, push after | Writes to mirror then uploads                                        |
-| `edit`        | Local mirror  | pull before, push after    | Exact replacement on mirror                                          |
-| `apply_patch` | Local mirror  | pull before, push after    | Applies patch on mirror                                              |
-
----
-
-## 🔒 Security Boundaries
-
-- **Path containment**: `PathMapper` validates that resolved local paths never escape the mirror root (`../` is rejected).
-- **Command safety**: Dynamic arguments to `bash` are passed through SSH without local shell interpolation when possible.
-- **Privilege scope**: Remote operations run with the SSH user's permissions — no elevation.
-- **Workspace boundary**: Operations outside `REMOTE_WORKDIR` follow OpenCode's native permission confirmation flow.
-
----
-
-## ⚠️ Limitations
-
-| Limitation                      | Impact                                                                         | Mitigation                               |
-| :------------------------------ | :----------------------------------------------------------------------------- | :--------------------------------------- |
-| Large file first-access latency | First download of a >100 MB file waits for SFTP                                | Subsequent edits use delta sync          |
-| No remote LSP                   | No language-server diagnostics for remote files                                | Not required for basic editing           |
-| Remote tool dependencies        | `glob`/`grep` prefer remote `rg`, fallback to `find`/`grep`          | Present on virtually all Linux distros   |
-| Concurrent edit safety          | `edit` tool has per-file locks; concurrent edits on same file are serialized | `bash`/`glob`/`grep` are stateless |
-| Binary files                    | `read` detects binaries by extension + content sampling                      | Use `bash` tools for binary inspection |
-| BOM handling                    | UTF-8 BOM is preserved across `read`/`write`/`edit`/`patch`            | Works transparently                      |
-
----
-
-## 📄 License
-
-MIT
+This work adapts `zz6zz666/opencode-remote-code` at the commit recorded in
+[UPSTREAM.md](UPSTREAM.md). It is distributed under the MIT license.

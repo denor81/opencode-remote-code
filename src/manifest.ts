@@ -47,6 +47,7 @@ export class ManifestManager {
     const normalized = path.posix.normalize(remotePath)
     let rel: string
     if (
+      this.manifest.remote_root === "/" ||
       normalized === this.manifest.remote_root ||
       normalized.startsWith(this.manifest.remote_root + "/")
     ) {
