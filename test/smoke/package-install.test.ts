@@ -123,23 +123,14 @@ describe("installed package", () => {
       expect(installedManifest.bin).toEqual({ "opencode-ssh": "dist/cli.js" })
       expect(installedManifest.description).toContain("tested against OpenCode 1.18.18")
 
-      const safetyDocument = await readFile(
-        path.join(
-          installedPackage,
-          "opencode-ssh-remote-use",
-          "opencode-ssh-safety.md"
-        ),
-        "utf8"
+      await access(
+        path.join(installedPackage, "opencode-ssh-remote-use", "opencode-ssh-safety.md")
       )
       const installationGuide = await readFile(
         path.join(installedPackage, "docs", "installation-and-usage.md"),
         "utf8"
       )
-      expect(new Set(safetyDocument.match(/<[A-Z_]+>/gu) ?? [])).toEqual(
-        new Set(["<ALLOWED_MUTATION_SCOPE>"])
-      )
-      expect(safetyDocument).not.toContain("<SSH_ALIAS>")
-      expect(safetyDocument).not.toContain("<REMOTE_WORKDIR>")
+      expect(installationGuide).toContain("included automatically")
       expect(installationGuide).toContain("## Manual TUI Checks")
       await expect(
         access(path.join(installedPackage, "opencode-ssh-remote-use", "AGENTS.md"))

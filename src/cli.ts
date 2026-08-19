@@ -2,7 +2,7 @@
 
 import { randomBytes } from "node:crypto"
 import { realpath, rm } from "node:fs/promises"
-import { pathToFileURL } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { REMOTE_ENV } from "./config.js"
 import {
   LauncherConfigError,
@@ -34,6 +34,10 @@ Examples:
   opencode-ssh staging /srv/app
   opencode-ssh admin-host /
 `
+
+const SAFETY_INSTRUCTIONS_PATH = fileURLToPath(
+  new URL("../opencode-ssh-remote-use/opencode-ssh-safety.md", import.meta.url)
+)
 
 interface ExitBeforeReady {
   kind: "exit"
@@ -139,7 +143,8 @@ export async function runCli(
     const configContent = mergeOpenCodeConfigContent(
       env.OPENCODE_CONFIG_CONTENT,
       pluginURL,
-      paths.launchID
+      paths.launchID,
+      SAFETY_INSTRUCTIONS_PATH
     )
     const childEnv: NodeJS.ProcessEnv = {
       ...env,

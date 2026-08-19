@@ -10,6 +10,9 @@ import { computeTargetID } from "../../src/runtime-paths.js"
 const fakeOpenCode = fileURLToPath(new URL("../fixtures/bin/opencode", import.meta.url))
 const fakeSftp = fileURLToPath(new URL("../fixtures/bin/sftp", import.meta.url))
 const fakeSsh = fileURLToPath(new URL("../fixtures/bin/ssh", import.meta.url))
+const safetyInstructionsPath = fileURLToPath(
+  new URL("../../opencode-ssh-remote-use/opencode-ssh-safety.md", import.meta.url)
+)
 const temporaryRoots: string[] = []
 
 interface OpenCodeInvocation {
@@ -86,7 +89,10 @@ describe("launcher lifecycle", () => {
       const merged = JSON.parse(invocation.configContent ?? "") as typeof existingConfig
       expect(merged.model).toBe(existingConfig.model)
       expect(merged.mcp).toEqual(existingConfig.mcp)
-      expect(merged.instructions).toEqual(existingConfig.instructions)
+      expect(merged.instructions).toEqual([
+        ...existingConfig.instructions,
+        safetyInstructionsPath,
+      ])
       expect(merged.plugin.slice(0, existingConfig.plugin.length)).toEqual(
         existingConfig.plugin
       )

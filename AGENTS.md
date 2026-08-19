@@ -13,18 +13,19 @@
 
 ## Remote Session Safety
 
-- When this repository is launched through `opencode-ssh`, read and follow `opencode-ssh-remote-use/opencode-ssh-safety.md` in full before any project action, then call `remote_status` and verify the active target.
+- `opencode-ssh` automatically includes `opencode-ssh-remote-use/opencode-ssh-safety.md` in the child OpenCode instructions; remote projects do not need a copy or an `AGENTS.md` reference.
+- When this repository is launched through `opencode-ssh`, follow the injected safety instructions, call `remote_status`, and verify the active target before any project action.
 - In an ordinary local checkout without an expected SSH session, the remote preflight does not apply. If an SSH session is expected but `remote_status` is absent, unhealthy, or inconsistent with the remote shell, stop.
 
 ## Runtime Shape
 
 - `src/cli.ts` provides exactly `opencode-ssh <ssh-alias> <absolute-remote-workdir>`; it does not forward OpenCode arguments.
-- The launcher starts a system OpenSSH ControlMaster, resolves the canonical remote workdir, injects the package-root server plugin through `OPENCODE_CONFIG_CONTENT`, requires a nonce-protected ready handshake, and supervises cleanup.
+- The launcher starts a system OpenSSH ControlMaster, resolves the canonical remote workdir, injects the safety-instruction path and package-root server plugin through `OPENCODE_CONFIG_CONTENT`, requires a nonce-protected ready handshake, and supervises cleanup.
 - `src/index.ts` is the server plugin entrypoint. It overrides `bash`, `glob`, `grep`, `read`, `write`, `edit`, and `apply_patch`, and adds `remote_status`.
 - Command tools use one-shot `ssh` channels through the owned socket. File tools use system `sftp` and a private launch-scoped mirror.
 - Slave SSH/SFTP processes fail closed when the master socket is unavailable. They do not open a replacement connection or retry commands.
 - `SyncEngine` uses operation-wide local transactions, per-file content baselines, deterministic remote lock directories, sibling temporary uploads, and atomic rename. It never pushes every manifest entry globally.
-- The system transform appends compact remote context and an optional bounded remote root `AGENTS.md`; it does not replace existing system entries.
+- OpenCode loads the generic safety file through its `instructions` configuration. The system transform separately appends compact remote context and an optional bounded remote root `AGENTS.md`; neither path replaces existing instructions.
 
 ## Configuration And SSH
 

@@ -57,12 +57,20 @@ describe("parseCli", () => {
 })
 
 describe("mergeOpenCodeConfigContent", () => {
+  const safetyInstructionsPath = "/opt/opencode/opencode-ssh-safety.md"
+
   it("creates additive config when existing content is absent", () => {
     const merged = JSON.parse(
-      mergeOpenCodeConfigContent(undefined, "file:///opt/opencode/plugin.js", "launch-1")
+      mergeOpenCodeConfigContent(
+        undefined,
+        "file:///opt/opencode/plugin.js",
+        "launch-1",
+        safetyInstructionsPath
+      )
     ) as Record<string, unknown>
 
     expect(merged).toEqual({
+      instructions: [safetyInstructionsPath],
       plugin: [["file:///opt/opencode/plugin.js", { launchID: "launch-1" }]],
     })
   })
@@ -70,9 +78,15 @@ describe("mergeOpenCodeConfigContent", () => {
   it("treats empty environment content as absent", () => {
     expect(
       JSON.parse(
-        mergeOpenCodeConfigContent("  \n", "file:///opt/opencode/plugin.js", "launch-1")
+        mergeOpenCodeConfigContent(
+          "  \n",
+          "file:///opt/opencode/plugin.js",
+          "launch-1",
+          safetyInstructionsPath
+        )
       )
     ).toEqual({
+      instructions: [safetyInstructionsPath],
       plugin: [["file:///opt/opencode/plugin.js", { launchID: "launch-1" }]],
     })
   })
@@ -82,11 +96,18 @@ describe("mergeOpenCodeConfigContent", () => {
       // Keep the user's normal configuration.
       "model": "provider/model",
       "mcp": { "search": { "enabled": true } },
+      "instructions": ["CONTRIBUTING.md"],
       "plugin": ["existing-plugin",],
     }`
     const merged = JSON.parse(
-      mergeOpenCodeConfigContent(content, new URL("file:///opt/opencode/plugin.js"), "fixed-id")
+      mergeOpenCodeConfigContent(
+        content,
+        new URL("file:///opt/opencode/plugin.js"),
+        "fixed-id",
+        safetyInstructionsPath
+      )
     ) as {
+      instructions: string[]
       model: string
       mcp: unknown
       plugin: unknown[]
@@ -94,10 +115,24 @@ describe("mergeOpenCodeConfigContent", () => {
 
     expect(merged.model).toBe("provider/model")
     expect(merged.mcp).toEqual({ search: { enabled: true } })
+    expect(merged.instructions).toEqual(["CONTRIBUTING.md", safetyInstructionsPath])
     expect(merged.plugin).toEqual([
       "existing-plugin",
       ["file:///opt/opencode/plugin.js", { launchID: "fixed-id" }],
     ])
+  })
+
+  it("does not duplicate an existing safety instruction path", () => {
+    const merged = JSON.parse(
+      mergeOpenCodeConfigContent(
+        JSON.stringify({ instructions: ["CONTRIBUTING.md", safetyInstructionsPath] }),
+        "file:///opt/opencode/plugin.js",
+        "launch-1",
+        safetyInstructionsPath
+      )
+    ) as { instructions: string[] }
+
+    expect(merged.instructions).toEqual(["CONTRIBUTING.md", safetyInstructionsPath])
   })
 
   it.each([
@@ -109,18 +144,43 @@ describe("mergeOpenCodeConfigContent", () => {
       content: '{"plugin": {}}',
       expected: /plugin must be an array/,
     },
+    {
+      name: "non-array instructions",
+      content: '{"instructions": {}}',
+      expected: /instructions must be an array of strings/,
+    },
+    {
+      name: "non-string instruction",
+      content: '{"instructions": ["README.md", 1]}',
+      expected: /instructions must be an array of strings/,
+    },
   ])("rejects $name input", ({ content, expected }) => {
     expect(() =>
-      mergeOpenCodeConfigContent(content, "file:///opt/opencode/plugin.js", "launch-1")
+      mergeOpenCodeConfigContent(
+        content,
+        "file:///opt/opencode/plugin.js",
+        "launch-1",
+        safetyInstructionsPath
+      )
     ).toThrow(expected)
   })
 
   it("requires a file URL and a safe launch ID", () => {
     expect(() =>
-      mergeOpenCodeConfigContent("{}", "https://example.test/plugin.js", "launch-1")
+      mergeOpenCodeConfigContent(
+        "{}",
+        "https://example.test/plugin.js",
+        "launch-1",
+        safetyInstructionsPath
+      )
     ).toThrow(LauncherConfigError)
     expect(() =>
-      mergeOpenCodeConfigContent("{}", "file:///plugin.js", "bad/id")
+      mergeOpenCodeConfigContent(
+        "{}",
+        "file:///plugin.js",
+        "bad/id",
+        safetyInstructionsPath
+      )
     ).toThrow(/Launch ID/)
   })
 })

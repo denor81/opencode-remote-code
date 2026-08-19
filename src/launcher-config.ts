@@ -71,13 +71,14 @@ function validateLaunchID(launchID: string): void {
 }
 
 /**
- * Add this launch's plugin tuple to OPENCODE_CONFIG_CONTENT without replacing
- * any existing configuration or plugins.
+ * Add this launch's safety instructions and plugin tuple to
+ * OPENCODE_CONFIG_CONTENT without replacing existing configuration.
  */
 export function mergeOpenCodeConfigContent(
   content: string | undefined,
   pluginFileURL: string | URL,
-  launchID: string
+  launchID: string,
+  safetyInstructionsPath: string
 ): string {
   validateLaunchID(launchID)
 
@@ -115,9 +116,24 @@ export function mergeOpenCodeConfigContent(
   if (existingPlugins !== undefined && !Array.isArray(existingPlugins)) {
     throw new LauncherConfigError("OPENCODE_CONFIG_CONTENT.plugin must be an array")
   }
+  const existingInstructions = config.instructions
+  if (
+    existingInstructions !== undefined &&
+    (!Array.isArray(existingInstructions) ||
+      !existingInstructions.every((instruction) => typeof instruction === "string"))
+  ) {
+    throw new LauncherConfigError(
+      "OPENCODE_CONFIG_CONTENT.instructions must be an array of strings"
+    )
+  }
+
+  const instructions = (existingInstructions ?? []) as string[]
 
   const merged = {
     ...config,
+    instructions: instructions.includes(safetyInstructionsPath)
+      ? instructions
+      : [...instructions, safetyInstructionsPath],
     plugin: [
       ...(existingPlugins ?? []),
       [fileURL, { launchID }],

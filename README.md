@@ -81,14 +81,11 @@ paths are preserved. Caller-directory project config (`opencode.json` or
 `.opencode/`) is intentionally not discovered because OpenCode starts in the
 stable launcher workspace rather than the directory where the command was
 typed. Put settings needed by remote sessions in global config or an absolute
-`OPENCODE_CONFIG` file. The remote root `AGENTS.md`, when present, is appended
-to the system context.
-
-For safe remote operation, add the packaged
+`OPENCODE_CONFIG` file. The launcher automatically adds the installed
 [`opencode-ssh-safety.md`](opencode-ssh-remote-use/opencode-ssh-safety.md) to the
-target project and explicitly require the project root `AGENTS.md` to read and
-follow it. No nested `AGENTS.md` is needed. The installation guide contains the
-generic integration snippet and optional mutation-scope behavior.
+child OpenCode instructions without replacing existing instructions. No copy,
+link, or remote project setup is required. The remote root `AGENTS.md`, when
+present, is appended separately for project-specific rules.
 
 The remote workdir is the initial project root and stable session identity. It
 is not a chroot:
@@ -151,7 +148,8 @@ The launcher:
 2. Starts a private OpenSSH ControlMaster for the alias.
 3. Resolves the canonical remote workdir.
 4. Creates a stable local OpenCode session directory from the alias and workdir.
-5. Adds this plugin to `OPENCODE_CONFIG_CONTENT` for the child process only.
+5. Adds the safety instructions and this plugin to `OPENCODE_CONFIG_CONTENT`
+   for the child process only.
 6. Starts the ordinary local OpenCode TUI without modifying global config.
 7. Requires a nonce-protected plugin-ready handshake.
 8. Closes OpenCode, the ControlMaster, socket, and ready file on exit.

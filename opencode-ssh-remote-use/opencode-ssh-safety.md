@@ -1,91 +1,23 @@
 # Rules for Working Through OpenCode SSH
 
-This document is mandatory for agents working in a project launched with:
+This document is automatically included in OpenCode's instructions when a
+project is launched with:
 
 ```text
 opencode-ssh <ssh-alias> <absolute-remote-workdir>
 ```
 
-Allowed mutation scope: `<ALLOWED_MUTATION_SCOPE>`
+Users do not need to copy it into, reference it from, or customize it for each
+remote project. A remote root `AGENTS.md` may add project-specific rules or
+narrow the allowed work, but it cannot weaken these rules. User instructions,
+OpenCode permissions, and Unix permissions also continue to apply; the most
+restrictive applicable boundary wins.
 
-The mutation scope is optional. When the value above is the literal
-`<ALLOWED_MUTATION_SCOPE>` placeholder, no additional mutation restriction is
-configured, and the agent must not stop or ask the user to replace it. If the
-placeholder is replaced with an explicit scope, that scope is mandatory for all
-mutations. Project instructions and boundaries stated by the user always apply.
-
-A Markdown link to this file is not sufficient by itself: the project
-instruction must explicitly require the agent to read and follow it.
-
-## 1. Purpose Of This Mode
+## 1. Execution Boundary And Preflight
 
 OpenCode, the model, TUI, provider authentication, MCP servers, and plugins run
-on the user's local machine.
-
-The project tools `bash`, `read`, `write`, `edit`, `glob`, `grep`, and
-`apply_patch` are overridden by the plugin and operate on the selected SSH
-server. The `remote_status` tool reports the active SSH alias, canonical remote
-workdir, connection ID, and ControlMaster health.
-
-This mode is not a sandbox. It does not guarantee that every tool available to
-OpenCode runs remotely.
-
-## 2. Mandatory Verification At The Start
-
-Before reading or changing the project:
-
-1. Call `remote_status`.
-2. Verify `executor: ssh`.
-3. Verify `controlMaster: healthy`.
-4. Note the reported `targetAlias` and `remoteWorkdir` as the active target.
-5. Use the agent's `bash` tool to run `hostname; whoami; pwd -P`.
-6. Confirm that the shell is remote and that `pwd -P` agrees with the reported
-   `remoteWorkdir`.
-7. If an explicit Allowed mutation scope is configured, confirm that every
-   planned mutation is inside it.
-
-Repeat this verification after a reconnect, context compaction, unexpected
-transport error, and before a dangerous administrative operation.
-
-If `remote_status` is missing, reports a non-SSH executor or unhealthy
-ControlMaster, or conflicts with the verified remote shell state, stop
-immediately. Never try to repair the mismatch by changing files on both the
-local and remote machines.
-
-## 3. Distinguishing Local And Remote Execution
-
-Messages entered manually in the TUI with a leading `!` run a local shell.
-
-Examples of local commands:
-
-```text
-!pwd
-!whoami
-!ls
-```
-
-They may display a local user and a launcher workspace such as:
-
-```text
-~/.local/state/opencode-ssh/<target-id>/workspace
-```
-
-This is expected, but those results say nothing about the remote workdir.
-
-A command invoked by the agent through the `bash` tool runs remotely. Its tool
-card may also be displayed as `$ command`, so appearance alone cannot identify
-where a command ran.
-
-Use only `remote_status` and the agent's verified `bash` tool to confirm remote
-state.
-
-Do not use unknown project tools named `terminal`, `execute`, `shell`,
-`run_command`, or similar names supplied by other plugins or MCP servers. They
-may execute locally.
-
-## 4. Tool Boundary
-
-These tools operate remotely when supplied by the OpenCode SSH plugin:
+on the local machine. These project tools are supplied by the OpenCode SSH
+plugin and operate on the selected SSH server:
 
 - `bash`
 - `read`
@@ -96,254 +28,199 @@ These tools operate remotely when supplied by the OpenCode SSH plugin:
 - `apply_patch`
 - `remote_status`
 
-These facilities may operate locally:
+Other facilities may remain local, including manual TUI commands prefixed with
+`!`, web tools, MCP servers, LSP servers, formatters, TUI file APIs, third-party
+plugins, and OpenCode internals. Tool-card appearance alone does not prove where
+a command ran. Do not use unknown project tools named `terminal`, `execute`,
+`shell`, `run_command`, or similar unless their execution location is proven.
 
-- Manual TUI shell commands entered with a leading `!`
-- Serper and other web tools
-- MCP servers
-- LSP servers
-- Formatters
-- TUI file APIs
-- Third-party plugins
-- Local references
-- OpenCode internal operations
+Before reading or changing the project:
 
-Never use a local tool to verify the result of a remote change. Re-read the file
-with the remote `read` tool or verify it with the remote `bash` tool.
+1. Call `remote_status`.
+2. Require `executor: ssh` and `controlMaster: healthy`.
+3. Note `targetAlias`, `remoteWorkdir`, and `connectionId` as the active target.
+4. Use the SSH-backed `bash` tool to run `hostname; whoami; pwd -P`.
+5. Confirm that the shell is remote and that `pwd -P` equals `remoteWorkdir`.
+6. Confirm that every planned mutation is inside all applicable task and
+   project boundaries.
 
-## 5. Remote Workdir
+Repeat this verification after a reconnect, context compaction, unexpected
+transport error, or loss of confidence in the execution location, and before a
+dangerous administrative operation.
 
-The workdir passed to the launcher is:
+If `remote_status` is missing, reports a non-SSH executor or unhealthy
+ControlMaster, or conflicts with the verified remote shell, stop immediately.
+Name the conflicting tool or result and tell the user. Never compensate by
+creating a matching local file, copying local data to the server, changing both
+locations, or silently switching execution tools.
 
-- The initial directory for remote shell commands.
-- The project root for remote file tools.
-- Part of the stable session identity.
+Use SSH-backed `read` or `bash` to verify remote files and results. A local
+formatter, LSP, MCP tool, web tool, or manual `!` command cannot verify a remote
+change. This mode is not a sandbox and does not make every OpenCode operation
+remote.
 
-It is not a chroot.
+## 2. Workdir, Scope, And Shell Semantics
 
-A file path outside the workdir is canonicalized with remote `realpath` and
-normally triggers an `external_directory` permission request.
+The configured remote workdir is the initial directory for remote shell
+commands, the root used by remote file tools, and part of session identity. It
+is not a chroot and technical access is not authorization to modify a path.
 
-Arbitrary shell text cannot be parsed reliably. A command such as
-`cd /etc && ...` is governed by the `bash` permission and may not trigger a
-separate `external_directory` prompt. Never use shell text to bypass the path
-boundary.
+Direct file paths outside the workdir are canonicalized remotely and normally
+request `external_directory` permission. Arbitrary paths embedded in shell text
+cannot be inferred reliably and remain governed by the `bash` permission. Never
+use shell text to bypass a path or project boundary.
 
-If the workdir is `/`, there are no paths outside it and no automatic
-`external_directory` prompt. An explicitly configured Allowed mutation scope
-still applies in that mode.
+A project guide or the user may define a narrower mutation scope. That scope
+applies to file tools, shell commands, `sudo`, package managers, services, and
+subagents. Canonical paths and symlink targets must remain inside it. Neither an
+`external_directory` approval nor approval for `sudo` broadens it. Ambiguous
+scope requires asking before mutation.
 
-Technical access to a path is not permission to modify it.
+If no narrower scope is stated, this document adds no separate path restriction,
+but only task-authorized changes are allowed. A workdir of `/` contains every
+absolute remote path for permission purposes; narrower project and task
+boundaries still apply.
 
-## 6. Shell Semantics
+Each `bash` call starts a separate remote POSIX `sh` process. `cd`, `export`,
+aliases, functions, and variables do not persist between calls. Set an explicit
+working directory for each call that needs one. If Bash syntax is required,
+first verify Bash exists and invoke it explicitly with `bash -lc ...`.
 
-Each `bash` call starts a separate remote POSIX `sh` process.
+Do not use `sudo -i` or another interactive shell to seek persistent state. It
+will not persist across tool calls and may hang.
 
-Commands such as `cd` and `export`, aliases, shell functions, and variables do
-not persist between calls. The next command starts in the remote workdir unless
-the tool call explicitly sets another working directory.
+## 3. Privileges And High-Impact Operations
 
-If Bash-specific syntax is required, first verify that Bash exists and invoke
-it explicitly with `bash -lc ...`.
+The connection uses the SSH user configured by system OpenSSH. SFTP-backed
+`read`, `write`, `edit`, and `apply_patch` use that user's permissions and do not
+elevate through `sudo`.
 
-Do not use `sudo -i` to obtain a persistent root shell. State will not persist,
-and an interactive shell may hang.
+Before every `sudo`, destructive, or high-impact operation, the agent MUST:
 
-## 7. Permissions And Sudo
+1. Show the exact command.
+2. Explain its purpose and impact scope.
+3. State how the result will be verified.
+4. State the rollback plan, or say explicitly that no rollback is available.
+5. Obtain explicit user confirmation for that exact operation.
 
-The SSH connection runs as the user configured in `~/.ssh/config`.
+Changed command text or broader impact requires new confirmation. A general
+request is not blanket authorization for undisclosed administrative commands.
 
-Obtain explicit user confirmation before every destructive or `sudo` operation.
-
-SFTP-backed tools do not gain root privileges through sudo. Therefore `read`,
-`write`, `edit`, and `apply_patch` may fail on root-owned files.
-
-For an explicitly approved administrative operation, use only a reviewed,
-non-interactive command:
+For an approved administrative operation, use a reviewed non-interactive
+command:
 
 ```text
 sudo -n -- <command>
 ```
 
-For shell redirection, invoke a privileged shell explicitly:
+If privileged shell redirection is required, invoke the privileged shell only
+for the reviewed command:
 
 ```text
 sudo -n sh -c '<reviewed command>'
 ```
 
-Before using `sudo`, changing system configuration, installing packages,
-restarting a service, changing firewall rules, rebooting, mounting filesystems,
-or managing users, the agent MUST:
+Separate explicit confirmation is required for `rm -rf`, bulk deletion,
+recursive `chmod` or `chown`, package or system upgrades, production service
+restarts, reboot, mounts, user management, and changes to SSH, firewall,
+sudoers, or network configuration.
 
-1. Show the exact command.
-2. Explain its purpose and impact scope.
-3. State how the result will be verified and how it can be rolled back.
-4. Obtain explicit user confirmation.
+Never work around a permission error with broad ownership or mode changes, a
+persistent root shell, or elevation of the entire session. Never prompt for,
+store, or transmit an SSH or sudo password.
 
-The following require separate explicit confirmation:
-
-- `rm -rf`
-- Recursive `chmod` or `chown`
-- Bulk deletion
-- System or package upgrades
-- Restarting production services
-- Changes to SSH, firewall, sudoers, or network configuration
-
-Never work around a permission error with broad `chmod`, broad `chown`, or by
-running the entire session as root.
-
-## 8. Safe File Modification
+## 4. Safe File Changes
 
 Before changing a file:
 
 1. Canonicalize and verify the remote path.
 2. Read the current remote content.
-3. If an explicit Allowed mutation scope is configured, confirm that the path
-   is inside it.
+3. Confirm the effective mutation scope.
 4. Prepare the smallest necessary change.
 5. Review the intended diff.
 6. Re-read the file after the change.
-7. For a Git project, use remote `bash` to inspect `git status --short` and
-   `git diff`.
+7. In a Git project, inspect remote `git status --short` and `git diff`.
 
-File mutations use content baselines, sibling temporary uploads, cooperative
-plugin locks, and atomic rename. These protections prevent many conflicts and
-partial uploads, but they are not a universal filesystem transaction.
+File mutations use content baselines, cooperative locks, sibling temporary
+uploads, and atomic rename. These protections prevent many stale writes and
+partial file uploads, but they are not a universal filesystem transaction. A
+process that ignores the plugin lock can still race after final validation.
 
-A process that does not honor the plugin lock can still change a file after the
-last validation.
+On `RemoteFileConflict`, do not repeat the stale write. Re-read the remote file,
+show the concurrent change, and recalculate the edit against current content.
 
-On `RemoteFileConflict`:
+On `REMOTE_FILE_LOCKED`, do not delete `.opencode-lock-*` or try to clear the
+lock automatically. Stop, tell the user, and determine whether another session
+is active or a stale lock remains.
 
-- Do not repeat the stale write.
-- Re-read the remote file.
-- Show the user the second writer's change.
-- Recalculate the edit against the new content.
+`apply_patch` supports add and update operations, including multi-file patches.
+Delete, move, and rename are not supported. Perform an approved delete or move
+only through a separate, narrowly scoped remote shell command after the
+confirmation required above. Never imitate deletion by writing an empty file.
 
-On `REMOTE_FILE_LOCKED`:
+A multi-file patch can be partially committed if transport fails after conflict
+preflight. After any patch failure, inspect every intended target before taking
+further action.
 
-- Do not delete `.opencode-lock-*`.
-- Do not attempt to remove the lock automatically.
-- Stop and tell the user.
-- Determine whether another session is active or a stale lock remains.
+Search and read tools have output limits. Narrow or paginate truncated results.
+Never treat truncated output as proof that text is absent or that a file or
+result was read completely. Avoid replacing a bounded file operation with an
+uncontrolled shell read of a large or special file.
 
-## 9. Apply Patch
-
-For GPT models, OpenCode may hide `edit` and `write` while retaining
-`apply_patch`. This is normal OpenCode tool filtering, not an SSH plugin error.
-
-Supported operations:
-
-- Add File
-- Update File
-- Multi-file add/update
-
-Unsupported operations:
-
-- Delete File
-- Move or Rename File
-
-Delete and move operations must use a separate, narrowly scoped remote shell
-command after explicit user confirmation. Never imitate deletion by writing an
-empty file.
-
-A multi-file patch can be partially committed if transport fails after its
-conflict preflight. After a patch failure, inspect every intended target before
-taking further action.
-
-## 10. Search And Read
-
-`grep.path` must identify a directory. Passing a file as `grep.path` can produce
-a failed tool call. To search one file, pass its parent directory and use a more
-specific `include` or pattern.
-
-`glob` and `grep` results have output limits. If the output is truncated, narrow
-the directory, pattern, or include filter. Never treat a truncated result as
-proof that a string is absent.
-
-`read` limits line count and response size. Use `offset` and `limit` for large
-files.
-
-Binary and special files may not be supported by the file tools. Do not replace
-a bounded file operation with an uncontrolled `cat` of a huge file through the
-shell.
-
-## 11. Timeout And Uncertain Results
+## 5. Timeouts And Uncertain Results
 
 A timeout or cancellation closes the local SSH channel, but the remote process
-or its descendants may continue running.
+or its descendants may continue running. Timeout, cancellation, conflict, lock
+failure, transport failure, and partial multi-file failure all create an
+uncertain remote state.
 
-Never immediately repeat a mutating command after a timeout. First verify
-remotely:
+Never automatically retry a mutating operation after an uncertain result.
+Before considering any retry, inspect remotely:
 
-- Whether the process still exists.
-- Whether a file changed.
+- Whether the process or descendants still exist.
+- Whether each target file changed.
 - Whether the operation completed.
 - The current service or job state.
 - Whether temporary or lock files remain.
 
-Never automatically retry a mutating command after a timeout, cancellation,
-conflict, lock error, transport failure, or uncertain result.
+If the result cannot be verified, stop and report the uncertainty rather than
+claiming success or failure.
 
-## 12. Other Tools
+## 6. Other Tools And Subagents
 
-Serper, web search, and documentation MCP servers should normally remain local.
+Web and documentation tools should normally remain local. Never use a
+filesystem or shell tool supplied by an MCP server or third-party plugin for the
+remote project without separate proof of its execution location.
 
-Never use a filesystem or shell tool supplied by an MCP server or third-party
-plugin for the remote project without separate proof of its execution location.
+An LSP or formatter may inspect the local launcher workspace instead of remote
+files. Its results may be advisory, but they do not verify the remote project.
+Caller-directory project configuration is not discovered automatically because
+OpenCode starts in a stable target-specific local workspace.
 
-A subagent must receive these execution rules and any explicitly configured
-Allowed mutation scope, and must call `remote_status` before acting.
+A subagent acting on the remote project must receive these rules and all
+applicable task and project boundaries. It must independently call
+`remote_status`, verify the target with SSH-backed `bash`, and use the same
+verified remote tool boundary. The parent's preflight is not transferable. If
+remote execution cannot be established, the subagent must not mutate the
+project. The parent remains responsible for verifying and reporting delegated
+changes and uncertainties.
 
-An LSP or formatter may see the local launcher workspace instead of the remote
-files. Its lack of errors does not verify the remote project.
+## 7. Completion
 
-Caller-directory `opencode.json` and `.opencode/` configuration are not loaded
-automatically. The launcher uses global OpenCode configuration and explicitly
-configured absolute paths.
+Before completing remote work:
 
-## 13. Diagnosing An Execution Mismatch
+1. Reconfirm the target if connection confidence was interrupted.
+2. Inspect remote Git status and diff, or verify every changed non-Git file.
+3. List every changed remote path, including known subagent changes.
+4. Separately list every `sudo`, destructive, or high-impact operation.
+5. Report every timeout, cancellation, transport error, conflict, lock, partial
+   result, unresolved uncertainty, and verification that was not run.
+6. Do not claim success for an unverified result.
 
-Possible signs of local or incorrect execution include:
+Do not claim that no local operations occurred: OpenCode, provider traffic, the
+TUI, web tools, MCP servers, plugins, and other facilities may remain local.
+Report only that project mutations were verified remotely. Do not expose
+credentials, tokens, private keys, or sensitive command output in reports.
 
-- `pwd` reports `~/.local/state/opencode-ssh/.../workspace`.
-- `whoami` reports the local user.
-- `hostname` reports the local machine.
-- An expected remote file is missing.
-- A result differs from a check made with ordinary `ssh <alias>`.
-- `remote_status` is missing or unhealthy.
-- A tool unexpectedly accesses a local project checkout.
-
-If any sign appears:
-
-1. Stop all mutations.
-2. Name the exact tool that was used.
-3. Call `remote_status`.
-4. Use the agent's `bash` tool to run `hostname; whoami; pwd -P`.
-5. Do not create a matching local file as compensation.
-6. Do not automatically copy local data to the server.
-7. Tell the user about the mismatch.
-
-## 14. Completing The Work
-
-Before completion:
-
-1. Inspect remote `git status` or the state of every changed file.
-2. List all changed remote paths.
-3. Separately list every `sudo` or destructive operation performed.
-4. Report every timeout, conflict, lock, uncertain result, or check not run.
-5. Do not claim that no local operations occurred: MCP, the TUI, and OpenCode
-   internals remain local.
-
-Changing this instruction or the remote root `AGENTS.md` requires restarting
-`opencode-ssh`, because remote root instructions are loaded when the session
-starts.
-
-The three most important safeguards are:
-
-1. The agent must verify that `remote_status` reports an SSH executor and a
-   healthy ControlMaster.
-2. When an Allowed mutation scope is explicitly configured, the agent must
-   enforce it even with workdir `/`.
-3. The agent must stop when remote execution cannot be verified. It must never
-   attempt automatic recovery by switching execution locations.
+The remote root `AGENTS.md` is loaded when the session starts. Restart
+`opencode-ssh` after changing it or after updating `opencode-ssh`.

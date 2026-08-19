@@ -100,53 +100,22 @@ The launcher disables account-password and keyboard-interactive fallback. It
 can still display OpenSSH host-key and private-key passphrase prompts. Load an
 encrypted key into `ssh-agent` when unattended reconnects are required.
 
-## Add The Safety Instructions To A Project
+## Automatic Safety Instructions
 
-Each remote project keeps its own repository-specific root `AGENTS.md`. Add the
-generic safety document alongside that guide; do not add another nested
-`AGENTS.md` under `opencode-ssh-remote-use`.
+The installed `opencode-ssh-safety.md` is included automatically in the child
+OpenCode instructions for every `opencode-ssh` launch. Existing OpenCode
+instructions are preserved. Do not copy or link the generic file into each
+remote project, and no safety reference is required in the project root
+`AGENTS.md`.
 
-When the project is already available in a local checkout, copy the packaged
-file into it:
+A remote root `AGENTS.md` remains optional for repository-specific commands,
+conventions, and narrower task or mutation boundaries. It is appended separately
+to the remote system context and cannot weaken the generic SSH safety rules.
 
-```bash
-mkdir -p opencode-ssh-remote-use
-cp /path/to/opencode-remote-code/opencode-ssh-remote-use/opencode-ssh-safety.md \
-  opencode-ssh-remote-use/opencode-ssh-safety.md
-```
-
-For a remote-only checkout, create the directory and transfer the file with the
-already verified SSH alias:
-
-```bash
-ssh project-server 'mkdir -p /srv/project/opencode-ssh-remote-use'
-scp /path/to/opencode-remote-code/opencode-ssh-remote-use/opencode-ssh-safety.md \
-  project-server:/srv/project/opencode-ssh-remote-use/
-```
-
-Add this explicit requirement to the remote project's root `AGENTS.md`:
-
-```markdown
-## OpenCode SSH Safety
-
-- When this project is launched through `opencode-ssh`, read and follow
-  `opencode-ssh-remote-use/opencode-ssh-safety.md` before any project action.
-```
-
-The safety file contains one optional value:
-
-```text
-Allowed mutation scope: `<ALLOWED_MUTATION_SCOPE>`
-```
-
-Leave the literal placeholder unchanged when no additional mutation boundary
-is required. Replace it with a reviewed path or scope when mutations must be
-narrower than the launcher workdir. User instructions and ordinary OpenCode
-permissions still apply in either case.
-
-Commit the project-specific root guide and generic safety file to the target
-project when appropriate. Never commit real credentials or a personalized
-launcher script.
+For projects configured with the previous manual workflow, remove the generic
+safety-file reference from root `AGENTS.md`. Move any project-specific boundary
+into the root guide itself, then remove the copied generic file if nothing else
+uses it. Never commit real credentials or a personalized launcher script.
 
 ## Create A Local Launch Script
 
@@ -300,6 +269,8 @@ Global OpenCode configuration remains available. Caller-directory
 `opencode.json` and `.opencode/` configuration are not discovered automatically
 because OpenCode starts in a stable target-specific local workspace. Put remote
 session settings in global configuration or an explicit absolute config path.
+The launcher adds its installed safety document to the child-only
+`OPENCODE_CONFIG_CONTENT.instructions` array while preserving existing entries.
 
 Agent calls to these tools operate remotely after the ready handshake:
 

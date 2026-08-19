@@ -48,10 +48,10 @@ opencode-ssh <ssh-alias> <absolute-remote-workdir>
 `~/.config/opencode` 下的全局配置以及绝对路径的显式配置会保留。由于 OpenCode
 从稳定的 launcher workspace 启动，调用命令目录中的 `opencode.json` 或
 `.opencode/` 不会自动加载；远程会话所需设置应放入全局配置或绝对路径的
-`OPENCODE_CONFIG`。远程根目录的 `AGENTS.md`（若存在）会追加到 system context。
-目标项目可以加入通用的
-[`opencode-ssh-safety.md`](opencode-ssh-remote-use/opencode-ssh-safety.md)，并在根
-`AGENTS.md` 中明确要求 agent 阅读和遵循该文件；无需嵌套 `AGENTS.md`。
+`OPENCODE_CONFIG`。launcher 会自动把已安装的
+[`opencode-ssh-safety.md`](opencode-ssh-remote-use/opencode-ssh-safety.md) 加入子
+OpenCode 的 instructions，并保留已有 instructions。无需向远程项目复制或链接该
+文件。远程根目录的 `AGENTS.md`（若存在）会另外追加，只用于项目特定规则。
 
 远程 workdir 是默认项目目录，但不是 chroot。直接访问 workdir 外的文件会请求
 `external_directory` 权限。`/` 可作为 workdir，此时整个远程文件系统都在项目

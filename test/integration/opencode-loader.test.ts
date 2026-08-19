@@ -10,6 +10,11 @@ import { spawnProcess } from "../../src/process.js"
 
 const packageRootURL = new URL("../../", import.meta.url)
 const packageRoot = fileURLToPath(packageRootURL)
+const safetyInstructionsPath = path.join(
+  packageRoot,
+  "opencode-ssh-remote-use",
+  "opencode-ssh-safety.md"
+)
 const fakeOpenCode = fileURLToPath(
   new URL("../fixtures/bin/opencode-debug", import.meta.url)
 )
@@ -114,8 +119,10 @@ describe("actual OpenCode server-plugin loader", () => {
       }
 
       const config = JSON.parse(invocation.configContent ?? "") as {
+        instructions?: string[]
         plugin?: Array<[string, { launchID: string }]>
       }
+      expect(config.instructions).toEqual([safetyInstructionsPath])
       expect(config.plugin).toHaveLength(1)
       const pluginTuple = config.plugin?.[0]
       expect(pluginTuple).toEqual([

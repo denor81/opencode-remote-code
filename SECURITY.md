@@ -8,9 +8,11 @@ Other OpenCode tools, external plugins, MCP servers, LSPs, formatters, provider
 traffic, TUI file APIs, and OpenCode internals remain local. This package is not
 a sandbox and does not provide a universal no-local-execution guarantee.
 
-Projects using this launcher should add and explicitly require the packaged
-[`opencode-ssh-safety.md`](opencode-ssh-remote-use/opencode-ssh-safety.md).
-That document is operational guidance, not sandbox enforcement.
+The launcher automatically adds the installed
+[`opencode-ssh-safety.md`](opencode-ssh-remote-use/opencode-ssh-safety.md) to the
+child OpenCode instructions. Remote projects do not need a copy or an
+`AGENTS.md` reference. That document is operational guidance, not sandbox
+enforcement.
 
 ## SSH
 
