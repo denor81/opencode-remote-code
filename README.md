@@ -4,8 +4,10 @@ Run OpenCode and its TUI locally while the normal project tools operate on a
 remote machine through system OpenSSH. The remote host needs no OpenCode,
 Node.js, plugin, or agent installation.
 
-Tested against OpenCode 1.18.18. Other versions are allowed with an advisory
-warning and should be validated with the manual TUI checks before use.
+Tested against OpenCode 1.18.18. Before every SSH connection, the launcher asks
+the installed OpenCode to load this server plugin in an isolated local check.
+An identified different version may continue only when that check passes. Manual
+TUI checks remain required before relying on a different version.
 
 ```bash
 opencode-ssh staging /srv/app
@@ -27,13 +29,12 @@ responsible for `~/.ssh/config`, keys, `ssh-agent`, host verification,
 ## Install
 
 ```bash
-npm ci
-npm run build
-npm install -g .
+npm run install:verified
 ```
 
-The final command installs the `opencode-ssh` executable from this checkout.
-Rebuild and reinstall after source changes. See the complete
+This installs the locked dependencies, runs the local test suite, builds and
+installs `opencode-ssh`, then runs the installed compatibility self-test. It
+requires OpenCode, `ssh`, and `sftp`, but no SSH target or provider. See the complete
 [installation and usage guide](docs/installation-and-usage.md) for OpenCode
 installation, SSH setup, a fixed-target local script, project safety
 instructions, and first-launch verification.
@@ -70,11 +71,21 @@ opencode-ssh <ssh-alias> <absolute-remote-workdir>
 There is no OpenCode argument forwarding. Model, provider, permission, plugin,
 and MCP settings come from the normal OpenCode configuration.
 
-Before SSH startup, the launcher queries the selected local `opencode` binary.
-Version 1.18.18 continues immediately. A different or unidentifiable version
-prints an advisory warning, waits three seconds so it can be reviewed or
-cancelled, and then continues. The warning is not a compatibility failure; run
-the documented manual TUI checks before relying on the new version.
+Before SSH startup, the launcher checks the selected local `opencode` version
+and runs `opencode debug config` with an isolated HOME, config, and workspace.
+The check must load this package's server plugin and return its private marker;
+otherwise the launcher stops before opening SSH. A different identified version
+may continue after a successful check and prints a warning. An unidentifiable
+version is blocked. This check does not observe TUI rendering, so run the
+documented manual TUI checks before relying on a new version. See the
+[automatic compatibility preflight](docs/installation-and-usage.md#automatic-compatibility-preflight)
+for the exact checks, regression coverage, and intentional limitations.
+
+The terminal reports `checking`, `testing`, `passed`, and `starting SSH` while
+the launcher is busy. `opencode-ssh self-test` runs the same local check without
+an SSH alias, remote host, project configuration, or provider. The verified
+installation runs it once to initialize a private probe config; later checks
+normally take a few seconds.
 
 Global configuration under `~/.config/opencode` and absolute explicit config
 paths are preserved. Caller-directory project config (`opencode.json` or
@@ -144,8 +155,8 @@ output does not authorize an automatic retry; inspect remote state first.
 
 The launcher:
 
-1. Checks the local OpenCode version and warns without blocking an untested one.
-2. Starts a private OpenSSH ControlMaster for the alias.
+1. Requires the local OpenCode version and isolated server-plugin loader check.
+2. Starts a private OpenSSH ControlMaster only after that check passes.
 3. Resolves the canonical remote workdir.
 4. Creates a stable local OpenCode session directory from the alias and workdir.
 5. Adds the safety instructions and this plugin to `OPENCODE_CONFIG_CONTENT`
@@ -171,6 +182,7 @@ npm run test:unit
 npm run test:integration
 npm run test:smoke
 npm pack --dry-run
+node dist/cli.js self-test
 ```
 
 Use a separate non-production SSH target for manual mutation tests. Legacy

@@ -6,8 +6,9 @@ machine needs only an SSH server and the standard utilities listed below; it
 does not need Node.js, OpenCode, this package, or another agent runtime.
 
 OpenCode SSH is tested against OpenCode 1.18.18. Other OpenCode versions are
-allowed, but the launcher displays a compatibility warning, waits three
-seconds, and recommends the manual TUI checks in this guide.
+allowed only after the installed OpenCode loads this package's server plugin in
+an isolated preflight. A different version still requires the manual TUI checks
+in this guide.
 
 ## Requirements
 
@@ -43,20 +44,19 @@ The expected version output is:
 1.18.18
 ```
 
-An existing OpenCode installation may be used instead. A different or
-unidentifiable version produces an advisory warning and a three-second pause;
-it is not blocked automatically.
+An existing OpenCode installation may be used instead. A different identified
+version continues only after the loader preflight passes and produces an
+advisory warning. An unidentifiable version or failed loader preflight is
+blocked before SSH starts.
 
 ## Install OpenCode SSH From Source
 
 Clone this repository using the HTTPS or SSH URL from its GitHub **Code** menu,
-then install the tracked dependency set and the CLI:
+then run the verified installation:
 
 ```bash
 cd opencode-remote-code
-npm ci
-npm run build
-npm install --global .
+npm run install:verified
 ```
 
 Verify both executables:
@@ -66,11 +66,110 @@ node --version
 opencode --version
 opencode-ssh --version
 opencode-ssh --help
+opencode-ssh self-test
 ```
+
+`install:verified` checks Node.js, OpenCode, `ssh`, and `sftp`; installs the
+locked dependencies; runs the real-SSH-free tests; installs the CLI; and runs
+the installed self-test. The self-test needs no SSH alias, remote host, provider,
+or project configuration. Its first run can take several seconds while OpenCode
+initializes its matching plugin SDK in a private config under the local cache;
+later runs normally take a few seconds.
 
 `opencode-ssh --version` reports this package's version, not the OpenCode
 version. Do not use `sudo npm install --global`; configure a user-owned npm
-global prefix instead if the command reports a permission error.
+global prefix instead if the command reports a permission error. Installation
+and the first self-test may use the configured npm registry.
+
+## Automatic Compatibility Preflight
+
+The automatic check is a focused behavioral startup probe, not the complete
+`npm test` suite. It runs before every real launch and is also available without
+a target through `opencode-ssh self-test`.
+
+### What The Startup Probe Verifies
+
+1. The selected `opencode` executable starts, completes `--version` within its
+   five-second process timeout, exits successfully, and prints one identifiable
+   semantic version.
+2. The same executable runs `opencode debug config` with a temporary HOME,
+   workspace, data, cache, state, runtime, and temporary directory. Normal
+   OpenCode/project configuration, providers, default plugins, external skills,
+   updates, sharing, and SSH configuration are not loaded.
+3. OpenCode resolves and imports the installed package-root server plugin. This
+   crosses the real package export, ESM module, production dependency, plugin
+   tuple, and plugin-factory boundary rather than merely checking that a file
+   exists.
+4. The plugin receives a private tuple containing a random 256-bit nonce and
+   returns a `config` hook. OpenCode itself must invoke that hook.
+5. The hook atomically publishes a mode-0600 marker containing the expected
+   protocol and nonce. The launcher validates both within 30 seconds. A stale,
+   partial, missing, or mismatched marker cannot pass.
+6. Only after that marker passes does a real launch create launch paths and
+   start the SSH ControlMaster. If the executable exits, crashes, hangs, or
+   returns an invalid result first, the command fails closed before any SSH
+   startup.
+
+The marker is the intended success boundary. Once the OpenCode host has invoked
+the registered hook, the launcher terminates the diagnostic `debug config`
+process instead of waiting for unrelated host shutdown work. The probe keeps one
+package-owned config under the local cache so OpenCode can reuse its generated
+plugin SDK dependencies. Its first initialization may use the caller's npm
+registry, proxy, and CA transport settings; user OpenCode and provider settings
+remain isolated.
+
+### Regressions It Is Intended To Catch
+
+- Removal or incompatible behavior of `opencode --version` or
+  `opencode debug config`.
+- OpenCode plugin-loader, package-export, ESM, or production dependency loading
+  failures.
+- Incompatible plugin tuple or server plugin-factory behavior.
+- OpenCode no longer registering or invoking the returned `config` hook.
+- Loader crashes, non-zero exits, hangs, missing markers, and invalid marker
+  protocol or nonce values.
+- A different OpenCode version that cannot load the installed plugin at all.
+
+These are practical failures that would otherwise prevent this launcher from
+bootstrapping its server plugin. They are checked against the actual installed
+OpenCode executable and production package, not a mocked OpenCode API.
+
+### What It Does Not Prove
+
+The private probe branch returns before creating an SSH pool or constructing the
+normal remote tools. It imports their modules, but it does not execute remote
+commands or ask the host to invoke each tool. It therefore does not certify:
+
+- runtime input/output behavior of every tool after registration;
+- real SSH/SFTP connectivity, remote permissions, or remote filesystem behavior;
+- TUI rendering, live Bash metadata, cancellation cards, or permission dialogs;
+- provider, MCP, LSP, formatter, or user-plugin interaction;
+- session persistence or every future OpenCode runtime behavior.
+
+An identified version different from the tested 1.18.18 baseline may continue
+only after the probe passes and always produces a warning. Passing means the
+loader boundary is compatible; it is not a claim of universal compatibility.
+
+### Related Gates
+
+- `opencode-ssh self-test` runs exactly the same target-free startup probe.
+- A normal launch subsequently requires a separate nonce-protected ready
+  handshake after SSH startup. That proves the normal SSH-backed plugin reached
+  its ready boundary before the launcher remains active; it is not part of the
+  pre-SSH probe.
+- `npm test` and `npm run install:verified` run the broader unit, integration,
+  actual-loader, packaging, and installed-CLI suites. They run during validation
+  or verified installation, not before every application launch.
+- The manual checks in [Manual TUI Checks](#manual-tui-checks) remain mandatory
+  before claiming support for another OpenCode version because automated loader
+  checks cannot observe terminal behavior.
+
+Implementation and regression anchors are `src/opencode-compatibility.ts`,
+`src/opencode-probe.ts`, the ordering in `src/cli.ts`, and the focused tests in
+`test/unit/opencode-compatibility.test.ts`, `test/unit/opencode-probe.test.ts`,
+`test/integration/launcher-lifecycle.test.ts`,
+`test/integration/opencode-loader.test.ts`, and
+`test/smoke/package-install.test.ts`.
 
 ## Configure OpenSSH
 
@@ -182,7 +281,7 @@ do not test the SSH-backed Bash tool.
 ## Manual TUI Checks
 
 Run these checks after installation and whenever the launcher warns that the
-local OpenCode version differs from the tested version or cannot be determined.
+local OpenCode version differs from the tested version.
 Use a non-production SSH target and a disposable remote directory. The agent
 must run each command, one at a time, through its SSH-backed `bash` tool. The
 human operator observes the existing Bash card in the actual TUI.
@@ -327,9 +426,7 @@ dependency until the automated and manual checks pass.
 After updating the source checkout:
 
 ```bash
-npm ci
-npm run build
-npm install --global .
+npm run install:verified
 ```
 
 To remove the launcher:

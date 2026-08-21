@@ -45,6 +45,28 @@ if (argv.length === 1 && argv[0] === "--version") {
   process.exit(configuredNumber("FAKE_OPENCODE_VERSION_EXIT_CODE", 0))
 }
 
+if (argv.length === 2 && argv[0] === "debug" && argv[1] === "config") {
+  const token = requiredEnvironment("OPENCODE_SSH_PROBE_TOKEN")
+  const resultPath = requiredEnvironment("OPENCODE_SSH_PROBE_RESULT")
+  const expectedProxy = process.env.npm_config_opencode_ssh_expected_https_proxy
+  if (expectedProxy !== undefined && process.env.https_proxy !== expectedProxy) {
+    throw new Error("Fake OpenCode requires the expected lowercase HTTPS proxy")
+  }
+  const config = JSON.parse(requiredEnvironment("OPENCODE_CONFIG_CONTENT"))
+  const tuple = config.plugin?.find(
+    (entry) => Array.isArray(entry) && entry[1]?.compatibilityProbe === token
+  )
+  if (!tuple) throw new Error("Fake OpenCode requires the compatibility probe tuple")
+  const temporaryPath = `${resultPath}.${process.pid}.${randomUUID()}.tmp`
+  writeFileSync(
+    temporaryPath,
+    `${JSON.stringify({ protocol: "opencode-ssh-loader-probe-v1", token })}\n`,
+    { encoding: "utf8", flag: "wx", mode: 0o600 }
+  )
+  renameSync(temporaryPath, resultPath)
+  process.exit(0)
+}
+
 const selectedEnvironmentNames = [
   "OPENCODE_SSH_ALIAS",
   "OPENCODE_SSH_WORKDIR",

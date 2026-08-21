@@ -5,8 +5,9 @@
 在本机运行 OpenCode 和 TUI，同时通过系统 OpenSSH 在远程主机上执行常用项目工具。
 远程主机无需安装 OpenCode、Node.js、插件或其他 agent runtime。
 
-本项目已针对 OpenCode 1.18.18 完成测试。其他版本可以继续启动，但 launcher 会先
-显示兼容性警告并等待三秒；正式使用前应完成手动 TUI 检查。
+本项目已针对 OpenCode 1.18.18 完成测试。每次建立 SSH 连接前，launcher 都会在
+隔离的本地环境中要求已安装的 OpenCode 加载本项目的 server plugin。其他可识别
+版本只有通过该检查后才能继续；手动 TUI 检查仍由用户完成。
 
 ```bash
 opencode-ssh staging /srv/app
@@ -19,10 +20,11 @@ opencode-ssh staging /
 ## 安装
 
 ```bash
-npm ci
-npm run build
-npm install -g .
+npm run install:verified
 ```
+
+该命令会安装锁定的依赖、运行本地测试、构建并全局安装 CLI，最后运行已安装的
+`opencode-ssh self-test`。它不需要 SSH 服务器、provider 或项目配置。
 
 要求 Node.js 22.22.2+、本机已安装 OpenCode，以及可用的 `ssh` 和 `sftp`。
 OpenCode 1.18.18 是当前测试基线。Windows 用户应在 WSL 中运行。远端初始支持
@@ -41,9 +43,13 @@ opencode-ssh <ssh-alias> <absolute-remote-workdir>
 
 模型、provider、权限、插件和 MCP 配置继续使用普通 OpenCode 配置。
 
-启动 SSH 之前，launcher 会检查本机 `opencode` 版本。1.18.18 不显示警告；其他
-版本或无法识别的版本会显示提示、等待三秒，然后继续运行。版本差异本身不会阻止
-启动。
+启动 SSH 之前，launcher 会检查本机 `opencode` 版本，并在隔离的 HOME、config
+和 workspace 中运行真实 loader 检查。loader 未能加载 plugin 时不会建立 SSH
+连接。其他可识别版本通过检查后会显示警告并继续；无法识别的版本会被阻止。
+该检查无法观察 TUI 绘制，因此版本变更后仍需完成人工检查。
+
+等待期间终端会简短显示 checking、testing、passed 和 starting SSH。
+`opencode-ssh self-test` 可在任意目录中单独运行，不需要 SSH alias 或远程主机。
 
 `~/.config/opencode` 下的全局配置以及绝对路径的显式配置会保留。由于 OpenCode
 从稳定的 launcher workspace 启动，调用命令目录中的 `opencode.json` 或

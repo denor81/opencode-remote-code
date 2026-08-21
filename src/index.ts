@@ -4,6 +4,7 @@ import { loadConfig } from "./config.js"
 import { ManifestManager } from "./manifest.js"
 import { PathMapper } from "./path-mapper.js"
 import { writeReadyHandshake } from "./ready-handshake.js"
+import { activateCompatibilityProbe } from "./opencode-probe.js"
 import { RemotePathResolver } from "./remote-path-resolver.js"
 import { buildRemoteSystemContext } from "./remote-system-prompt.js"
 import { quoteShell } from "./shell-quote.js"
@@ -19,6 +20,9 @@ import { createStatusTool } from "./tools/status.js"
 import { createWriteTool } from "./tools/write.js"
 
 const RemoteCodePlugin: Plugin = async (_input, options) => {
+  const probe = activateCompatibilityProbe(options)
+  if (probe) return probe
+
   const config = loadConfig(options)
   if (!config) return {}
 

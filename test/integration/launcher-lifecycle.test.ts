@@ -8,6 +8,9 @@ import { REMOTE_ENV } from "../../src/config.js"
 import { computeTargetID } from "../../src/runtime-paths.js"
 
 const fakeOpenCode = fileURLToPath(new URL("../fixtures/bin/opencode", import.meta.url))
+const fakeOpenCodeDebug = fileURLToPath(
+  new URL("../fixtures/bin/opencode-debug", import.meta.url)
+)
 const fakeSftp = fileURLToPath(new URL("../fixtures/bin/sftp", import.meta.url))
 const fakeSsh = fileURLToPath(new URL("../fixtures/bin/ssh", import.meta.url))
 const safetyInstructionsPath = fileURLToPath(
@@ -173,7 +176,7 @@ describe("launcher lifecycle", () => {
     ).resolves.toBe(23)
   })
 
-  it("warns before starting SSH and continues after the compatibility delay", async () => {
+  it("warns after a successful compatibility check for another version", async () => {
     const alias = "future-version-host"
     const fixture = await createFixture("/srv/future-version", {
       FAKE_OPENCODE_VERSION_STDOUT: "9.8.7\n",
@@ -182,24 +185,53 @@ describe("launcher lifecycle", () => {
       FAKE_OPENCODE_EXIT_CODE: "17",
     })
     const warnings: string[] = []
-    const waits: number[] = []
-    let sshStartedDuringWait = true
+    const progress: string[] = []
 
     await expect(
       runCli([alias, "/srv/requested"], fixture.env, {
         writeWarning: (message) => warnings.push(message),
-        wait: async (milliseconds) => {
-          waits.push(milliseconds)
-          sshStartedDuringWait = await pathExists(fixture.sshLog)
-        },
+        writeProgress: (message) => progress.push(message),
       })
     ).resolves.toBe(17)
 
     expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain("OpenCode 9.8.7 differs from the tested version")
-    expect(waits).toEqual([3_000])
-    expect(sshStartedDuringWait).toBe(false)
+    expect(warnings[0]).toContain("OpenCode 9.8.7 passed the loader check")
+    expect(progress).toEqual([
+      "checking OpenCode compatibility...",
+      "testing OpenCode 9.8.7 plugin loader...",
+      expect.stringMatching(/^compatibility passed/u),
+      "starting SSH session...",
+    ])
     expect(parseJsonLines<OpenCodeInvocation>(await readFile(fixture.openCodeLog, "utf8"))).toHaveLength(1)
+  }, 10_000)
+
+  it("runs the installed-style self-test without starting SSH", async () => {
+    const fixture = await createFixture("/srv/unused")
+    const progress: string[] = []
+
+    await expect(
+      runCli(["self-test"], fixture.env, {
+        writeProgress: (message) => progress.push(message),
+      })
+    ).resolves.toBe(0)
+
+    expect(progress.at(-1)).toBe("self-test passed")
+    expect(await pathExists(fixture.sshLog)).toBe(false)
+    expect(await pathExists(fixture.openCodeLog)).toBe(false)
+  })
+
+  it("blocks before SSH when the loader probe fails", async () => {
+    const fixture = await createFixture("/srv/unused")
+    fixture.env.OPENCODE_SSH_OPENCODE_BIN = fakeOpenCodeDebug
+    fixture.env.FAKE_OPENCODE_REAL_BIN = fakeOpenCode
+    fixture.env.PATH = [path.dirname(process.execPath), "/usr/bin", "/bin"].join(
+      path.delimiter
+    )
+
+    await expect(runCli(["incompatible-host", "/srv/requested"], fixture.env)).rejects.toThrow(
+      /plugin loader exited/u
+    )
+    expect(await pathExists(fixture.sshLog)).toBe(false)
   })
 
   it("fails before starting SSH when OpenCode is unavailable", async () => {
@@ -210,7 +242,7 @@ describe("launcher lifecycle", () => {
     )
 
     await expect(runCli(["missing-opencode-host", "/srv/requested"], fixture.env)).rejects.toThrow(
-      /Failed to spawn process/u
+      /OpenCode is required.*npm install --global opencode-ai@1\.18\.18/u
     )
     expect(await pathExists(fixture.sshLog)).toBe(false)
   })

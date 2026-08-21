@@ -10,7 +10,7 @@ import {
   parseCli,
 } from "./launcher-config.js"
 import {
-  warnIfOpenCodeIsUntested,
+  runOpenCodeCompatibilityCheck,
   type OpenCodeCompatibilityHooks,
 } from "./opencode-compatibility.js"
 import { readPackageMetadata } from "./package-metadata.js"
@@ -26,6 +26,7 @@ import { SshClient } from "./ssh/client.js"
 import { ControlMaster } from "./ssh/control-master.js"
 
 const HELP = `Usage: opencode-ssh <ssh-alias> <absolute-remote-workdir>
+       opencode-ssh self-test
 
 Run the local OpenCode TUI while bash, read, write, edit, glob, grep, and
 apply_patch operate through the named system OpenSSH host.
@@ -38,6 +39,7 @@ Examples:
 const SAFETY_INSTRUCTIONS_PATH = fileURLToPath(
   new URL("../opencode-ssh-remote-use/opencode-ssh-safety.md", import.meta.url)
 )
+const PACKAGE_ROOT_URL = new URL("../", import.meta.url)
 
 interface ExitBeforeReady {
   kind: "exit"
@@ -62,7 +64,7 @@ export async function runCli(
     process.stdout.write(`${(await readPackageMetadata()).version}\n`)
     return 0
   }
-  if (/^(1|true)$/i.test(env.OPENCODE_PURE ?? "")) {
+  if (parsed.action === "launch" && /^(1|true)$/i.test(env.OPENCODE_PURE ?? "")) {
     throw new LauncherConfigError(
       "OPENCODE_PURE=1 disables external plugins and cannot be used with opencode-ssh"
     )
@@ -90,19 +92,26 @@ export async function runCli(
   try {
     const opencodeBinary = env.OPENCODE_SSH_OPENCODE_BIN || "opencode"
     const { testedOpenCodeVersion } = await readPackageMetadata()
-    await warnIfOpenCodeIsUntested({
+    await runOpenCodeCompatibilityCheck({
       binary: opencodeBinary,
       env,
       signal: controller.signal,
       testedVersion: testedOpenCodeVersion,
-      ...compatibilityHooks,
+      pluginURL: PACKAGE_ROOT_URL,
+      writeProgress: compatibilityHooks.writeProgress,
+      writeWarning: compatibilityHooks.writeWarning,
     })
+    if (parsed.action === "self-test") {
+      compatibilityHooks.writeProgress?.("self-test passed")
+      return 0
+    }
 
     const launchPaths = await createLaunchPaths({ env })
     socketPath = launchPaths.socketPath
     const sshBinary = env.OPENCODE_SSH_SSH_BIN || "ssh"
     const sftpBinary = env.OPENCODE_SSH_SFTP_BIN || "sftp"
 
+    compatibilityHooks.writeProgress?.("starting SSH session...")
     master = await ControlMaster.start(
       parsed.alias,
       launchPaths.socketPath,
@@ -139,10 +148,9 @@ export async function runCli(
     }
     // Loading the package root lets OpenCode select the ./server export and
     // skip this server-only plugin in the TUI plugin runtime.
-    const pluginURL = new URL("../", import.meta.url)
     const configContent = mergeOpenCodeConfigContent(
       env.OPENCODE_CONFIG_CONTENT,
-      pluginURL,
+      PACKAGE_ROOT_URL,
       paths.launchID,
       SAFETY_INSTRUCTIONS_PATH
     )
@@ -237,7 +245,10 @@ function describeExit(result: ProcessResult): string {
 
 async function main(): Promise<void> {
   try {
-    process.exitCode = await runCli()
+    process.exitCode = await runCli(process.argv.slice(2), process.env, {
+      writeProgress: (message) => process.stderr.write(`opencode-ssh: ${message}\n`),
+      writeWarning: (message) => process.stderr.write(`opencode-ssh: warning: ${message}\n`),
+    })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     process.stderr.write(`opencode-ssh: ${message}\n`)

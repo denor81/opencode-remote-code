@@ -4,7 +4,7 @@ import { spawn } from "node:child_process"
 import { appendFileSync, existsSync, mkdirSync } from "node:fs"
 
 if (process.argv.length === 3 && process.argv[2] === "--version") {
-  const result = await runChild(requiredEnvironment("FAKE_OPENCODE_REAL_BIN"), ["--version"], {
+  const result = await runChild(process.env.FAKE_OPENCODE_REAL_BIN ?? "opencode", ["--version"], {
     env: process.env,
     shell: false,
     stdio: ["ignore", "inherit", "inherit"],
@@ -66,6 +66,8 @@ const childEnvironmentNames = [
   "OPENCODE_SSH_MIRROR_ROOT",
   "OPENCODE_SSH_SSH_BIN",
   "OPENCODE_SSH_SFTP_BIN",
+  "OPENCODE_SSH_PROBE_TOKEN",
+  "OPENCODE_SSH_PROBE_RESULT",
   "FAKE_SSH_LOG",
   "FAKE_SSH_INPUT",
   "FAKE_SSH_INPUT_LOG",
@@ -102,7 +104,7 @@ const childEnvironment = Object.fromEntries(
     return value === undefined ? [] : [[name, value]]
   })
 )
-const result = await runChild(requiredEnvironment("FAKE_OPENCODE_REAL_BIN"), childArgv, {
+const result = await runChild(process.env.FAKE_OPENCODE_REAL_BIN ?? "opencode", childArgv, {
   cwd: process.cwd(),
   env: childEnvironment,
   shell: false,
@@ -124,10 +126,8 @@ const invocation = {
   exitCode: result.status,
   signal: result.signal,
 }
-appendFileSync(
-  requiredEnvironment("FAKE_OPENCODE_LOG"),
-  `${JSON.stringify(invocation)}\n`
-)
+const logPath = process.env.FAKE_OPENCODE_LOG
+if (logPath) appendFileSync(logPath, `${JSON.stringify(invocation)}\n`)
 
 if (result.error) {
   process.stderr.write(`opencode-debug: ${result.error.message}\n`)

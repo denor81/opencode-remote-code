@@ -170,7 +170,7 @@ describe("actual OpenCode server-plugin loader", () => {
         expect(sshInputs.some((input) => input.includes(probe)), probe).toBe(true)
       }
     },
-    45_000
+    75_000
   )
 
   it("forwards probe termination from the debug wrapper to its child", async () => {

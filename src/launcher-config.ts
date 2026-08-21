@@ -13,6 +13,7 @@ const SSH_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 export type CliOptions =
   | { action: "launch"; alias: string; workdir: string }
   | { action: "help" }
+  | { action: "self-test" }
   | { action: "version" }
 
 export class LauncherConfigError extends Error {
@@ -29,6 +30,9 @@ export function parseCli(argv: readonly string[]): CliOptions {
   }
   if (argv.length === 1 && (argv[0] === "--version" || argv[0] === "-V")) {
     return { action: "version" }
+  }
+  if (argv.length === 1 && argv[0] === "self-test") {
+    return { action: "self-test" }
   }
   if (argv.length !== 2) {
     throw new LauncherConfigError(

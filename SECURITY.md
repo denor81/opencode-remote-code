@@ -18,8 +18,10 @@ enforcement.
 
 - SSH aliases are passed to system OpenSSH as literal process arguments.
 - The launcher never uses a local shell to spawn `ssh`, `sftp`, or `opencode`.
-- The selected `opencode --version` probe is bounded and uses no shell. Its
-  warning is advisory and does not certify compatibility or executable identity.
+- Before SSH startup, the selected OpenCode must pass a bounded version check
+  and load the package-root server plugin through `debug config`. The loader
+  probe uses generated local configuration and no shell or SSH target. It
+  verifies loader behavior, not TUI rendering or universal compatibility.
 - `~/.ssh/config`, `known_hosts`, `ssh-agent`, key passphrases, and `ProxyJump`
   remain under OpenSSH control.
 - SSH password and keyboard-interactive authentication are disabled.

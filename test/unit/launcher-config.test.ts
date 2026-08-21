@@ -19,11 +19,12 @@ describe("parseCli", () => {
     })
   })
 
-  it("models launcher-owned help and version commands", () => {
+  it("models launcher-owned help, version, and self-test commands", () => {
     expect(parseCli(["--help"])).toEqual({ action: "help" })
     expect(parseCli(["-h"])).toEqual({ action: "help" })
     expect(parseCli(["--version"])).toEqual({ action: "version" })
     expect(parseCli(["-V"])).toEqual({ action: "version" })
+    expect(parseCli(["self-test"])).toEqual({ action: "self-test" })
   })
 
   it("does not accept OpenCode argument forwarding", () => {

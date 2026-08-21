@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url))
+const fakeOpenCode = fileURLToPath(new URL("../fixtures/bin/opencode", import.meta.url))
 const requiredPackageFiles = [
   "dist/cli.js",
   "dist/index.js",
@@ -122,6 +123,17 @@ describe("installed package", () => {
       ) as { bin: Record<string, string>; description: string; version: string }
       expect(installedManifest.bin).toEqual({ "opencode-ssh": "dist/cli.js" })
       expect(installedManifest.description).toContain("tested against OpenCode 1.18.18")
+      const exportedEntry = await runCommand(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          'const entry = await import("opencode-ssh/server"); if (typeof entry.default?.server !== "function") process.exitCode = 1',
+        ],
+        { cwd: installPrefix, env: npmEnvironment },
+        10_000
+      )
+      expectSuccess(exportedEntry)
 
       await access(
         path.join(installedPackage, "opencode-ssh-remote-use", "opencode-ssh-safety.md")
@@ -174,9 +186,20 @@ describe("installed package", () => {
         { cwd: temporaryRoot, env: cliEnvironment },
         10_000
       )
+      const selfTestEnvironment = {
+        ...cliEnvironment,
+        OPENCODE_SSH_OPENCODE_BIN: fakeOpenCode,
+      }
+      const selfTestCommand = await runCommand(
+        "opencode-ssh",
+        ["self-test"],
+        { cwd: temporaryRoot, env: selfTestEnvironment },
+        10_000
+      )
 
       expectSuccess(helpCommand)
       expectSuccess(versionCommand)
+      expectSuccess(selfTestCommand)
       await expect(access(sshAttemptLog)).rejects.toMatchObject({ code: "ENOENT" })
       expect(helpCommand.stderr).toBe("")
       expect(helpCommand.stdout).toContain(
@@ -184,6 +207,8 @@ describe("installed package", () => {
       )
       expect(versionCommand.stderr).toBe("")
       expect(versionCommand.stdout).toBe(`${installedManifest.version}\n`)
+      expect(selfTestCommand.stderr).toContain("compatibility passed")
+      expect(selfTestCommand.stderr).toContain("self-test passed")
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true })
     }

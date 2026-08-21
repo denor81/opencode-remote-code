@@ -1,165 +1,124 @@
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
-import { warnIfOpenCodeIsUntested } from "../../src/opencode-compatibility.js"
+import { runOpenCodeCompatibilityCheck } from "../../src/opencode-compatibility.js"
 import { readPackageMetadata } from "../../src/package-metadata.js"
 
 const fakeOpenCode = fileURLToPath(new URL("../fixtures/bin/opencode", import.meta.url))
+const pluginURL = new URL("../../", import.meta.url)
 
-describe("OpenCode compatibility warning", () => {
-  it("continues immediately for the tested version", async () => {
+describe("OpenCode compatibility preflight", () => {
+  it("runs the loader probe and reports concise progress", async () => {
     const { testedOpenCodeVersion } = await readPackageMetadata()
-    const warnings: string[] = []
-    const waits: number[] = []
+    const progress: string[] = []
 
-    await warnIfOpenCodeIsUntested({
+    await runOpenCodeCompatibilityCheck({
       binary: fakeOpenCode,
       env: { ...process.env },
       signal: new AbortController().signal,
       testedVersion: testedOpenCodeVersion,
-      writeWarning: (message) => warnings.push(message),
-      wait: async (milliseconds) => {
-        waits.push(milliseconds)
-      },
+      pluginURL,
+      writeProgress: (message) => progress.push(message),
+      writeWarning: () => undefined,
     })
 
-    expect(warnings).toEqual([])
-    expect(waits).toEqual([])
+    expect(progress).toHaveLength(3)
+    expect(progress[0]).toBe("checking OpenCode compatibility...")
+    expect(progress[1]).toBe(`testing OpenCode ${testedOpenCodeVersion} plugin loader...`)
+    expect(progress[2]).toMatch(/^compatibility passed \([\d.]+s\)$/u)
   })
 
-  it("accepts the tested stdout version despite a truncated stderr diagnostic", async () => {
-    const { testedOpenCodeVersion } = await readPackageMetadata()
-    const warnings: string[] = []
-    const waits: number[] = []
-
-    await warnIfOpenCodeIsUntested({
-      binary: fakeOpenCode,
-      env: {
-        ...process.env,
-        FAKE_OPENCODE_VERSION_STDERR: "x".repeat(5_000),
-      },
-      signal: new AbortController().signal,
-      testedVersion: testedOpenCodeVersion,
-      writeWarning: (message) => warnings.push(message),
-      wait: async (milliseconds) => {
-        waits.push(milliseconds)
-      },
-    })
-
-    expect(warnings).toEqual([])
-    expect(waits).toEqual([])
-  })
-
-  it("warns, waits three seconds, and continues for another version", async () => {
-    const { testedOpenCodeVersion } = await readPackageMetadata()
-    const warnings: string[] = []
-    const waits: number[] = []
-
-    await warnIfOpenCodeIsUntested({
-      binary: fakeOpenCode,
-      env: { ...process.env, FAKE_OPENCODE_VERSION_STDOUT: "9.8.7\n" },
-      signal: new AbortController().signal,
-      testedVersion: testedOpenCodeVersion,
-      writeWarning: (message) => warnings.push(message),
-      wait: async (milliseconds) => {
-        waits.push(milliseconds)
-      },
-    })
-
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain(`OpenCode 9.8.7 differs from the tested version ${testedOpenCodeVersion}`)
-    expect(warnings[0]).toContain("manual TUI checks")
-    expect(waits).toEqual([3_000])
-  })
-
-  it("does not reflect untrusted output when the version is unknown", async () => {
+  it("allows a different identified version only after a successful probe", async () => {
     const { testedOpenCodeVersion } = await readPackageMetadata()
     const warnings: string[] = []
 
-    await warnIfOpenCodeIsUntested({
+    await runOpenCodeCompatibilityCheck({
       binary: fakeOpenCode,
-      env: {
-        ...process.env,
-        FAKE_OPENCODE_VERSION_STDOUT: "unexpected\nsecond line\n",
-        FAKE_OPENCODE_VERSION_STDERR: "private diagnostic",
-      },
+      env: { ...process.env, FAKE_OPENCODE_VERSION_STDOUT: "1.18.19\n" },
       signal: new AbortController().signal,
       testedVersion: testedOpenCodeVersion,
+      pluginURL,
+      writeProgress: () => undefined,
       writeWarning: (message) => warnings.push(message),
-      wait: async () => undefined,
     })
 
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain("could not be determined")
-    expect(warnings[0]).not.toContain("unexpected")
-    expect(warnings[0]).not.toContain("private diagnostic")
+    expect(warnings).toEqual([
+      `OpenCode 1.18.19 passed the loader check but differs from the tested version ${testedOpenCodeVersion}; visual TUI checks remain required.`,
+    ])
   })
 
-  it("warns and continues when the version command exits non-zero", async () => {
+  it("forwards lowercase proxy settings needed by the loader", async () => {
     const { testedOpenCodeVersion } = await readPackageMetadata()
-    const warnings: string[] = []
-    const waits: number[] = []
+    const proxy = "http://proxy.example.invalid:8080"
 
-    await warnIfOpenCodeIsUntested({
-      binary: fakeOpenCode,
-      env: {
-        ...process.env,
-        FAKE_OPENCODE_VERSION_STDERR: "version unavailable",
-        FAKE_OPENCODE_VERSION_EXIT_CODE: "2",
-      },
-      signal: new AbortController().signal,
-      testedVersion: testedOpenCodeVersion,
-      writeWarning: (message) => warnings.push(message),
-      wait: async (milliseconds) => {
-        waits.push(milliseconds)
-      },
-    })
+    await expect(
+      runOpenCodeCompatibilityCheck({
+        binary: fakeOpenCode,
+        env: {
+          ...process.env,
+          https_proxy: proxy,
+          npm_config_opencode_ssh_expected_https_proxy: proxy,
+        },
+        signal: new AbortController().signal,
+        testedVersion: testedOpenCodeVersion,
+        pluginURL,
+      })
+    ).resolves.toBeUndefined()
+  })
 
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain("could not be determined")
-    expect(warnings[0]).not.toContain("version unavailable")
-    expect(waits).toEqual([3_000])
+  it("fails when the OpenCode version cannot be identified", async () => {
+    const { testedOpenCodeVersion } = await readPackageMetadata()
+
+    await expect(
+      runOpenCodeCompatibilityCheck({
+        binary: fakeOpenCode,
+        env: { ...process.env, FAKE_OPENCODE_VERSION_STDOUT: "unexpected output\n" },
+        signal: new AbortController().signal,
+        testedVersion: testedOpenCodeVersion,
+        pluginURL,
+      })
+    ).rejects.toThrow(/version could not be determined/u)
   })
 
   it("fails immediately when the OpenCode executable cannot be started", async () => {
     const { testedOpenCodeVersion } = await readPackageMetadata()
-    const warnings: string[] = []
-    const waits: number[] = []
 
     await expect(
-      warnIfOpenCodeIsUntested({
+      runOpenCodeCompatibilityCheck({
         binary: "/definitely/missing/opencode",
         env: { ...process.env },
         signal: new AbortController().signal,
         testedVersion: testedOpenCodeVersion,
-        writeWarning: (message) => warnings.push(message),
-        wait: async (milliseconds) => {
-          waits.push(milliseconds)
-        },
+        pluginURL,
       })
-    ).rejects.toThrow(/Failed to spawn process/u)
-
-    expect(warnings).toEqual([])
-    expect(waits).toEqual([])
+    ).rejects.toThrow(/OpenCode is required.*npm install --global opencode-ai@1\.18\.18/u)
   })
 
-  it("propagates cancellation during the warning delay", async () => {
+  it("does not report other executable errors as a missing installation", async () => {
     const { testedOpenCodeVersion } = await readPackageMetadata()
-    const controller = new AbortController()
-    const cancellation = new Error("cancel compatibility wait")
 
     await expect(
-      warnIfOpenCodeIsUntested({
-        binary: fakeOpenCode,
-        env: { ...process.env, FAKE_OPENCODE_VERSION_STDOUT: "9.8.7\n" },
-        signal: controller.signal,
+      runOpenCodeCompatibilityCheck({
+        binary: "/",
+        env: { ...process.env },
+        signal: new AbortController().signal,
         testedVersion: testedOpenCodeVersion,
-        writeWarning: () => undefined,
-        wait: async (_milliseconds, signal) => {
-          controller.abort(cancellation)
-          throw signal.reason
-        },
+        pluginURL,
       })
-    ).rejects.toBe(cancellation)
+    ).rejects.toThrow(/Failed to spawn process/u)
+  })
+
+  it("reports a failed version command before running the loader", async () => {
+    const { testedOpenCodeVersion } = await readPackageMetadata()
+
+    await expect(
+      runOpenCodeCompatibilityCheck({
+        binary: fakeOpenCode,
+        env: { ...process.env, FAKE_OPENCODE_VERSION_EXIT_CODE: "7" },
+        signal: new AbortController().signal,
+        testedVersion: testedOpenCodeVersion,
+        pluginURL,
+      })
+    ).rejects.toThrow(/version check exited with code 7/u)
   })
 
   it("derives the tested version from the exact plugin dependency", async () => {

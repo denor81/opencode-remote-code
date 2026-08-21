@@ -24,6 +24,7 @@ npm run test:unit
 npm run test:integration
 npm run test:smoke
 npm pack --dry-run
+node dist/cli.js self-test
 ```
 
 The actual OpenCode loader integration test must run, not skip. It accepts any
@@ -36,6 +37,7 @@ Install the tested build only after these commands pass:
 ```bash
 npm install -g .
 opencode-ssh --version
+opencode-ssh self-test
 ```
 
 ## Remote Test Directory
@@ -74,7 +76,8 @@ Run these checks only through the agent's SSH-backed `bash` tool in the actual
 OpenCode TUI. Manual shell commands entered with a leading `!` are local and do
 not test this feature.
 OpenCode 1.18.18 is the recorded baseline; repeat all five checks whenever the
-launcher warns that a different or unidentifiable OpenCode version is active.
+launcher warns that a different OpenCode version is active. The automatic
+loader check does not replace these visual observations.
 
 1. Ask the agent to run this command on the disposable target:
 
