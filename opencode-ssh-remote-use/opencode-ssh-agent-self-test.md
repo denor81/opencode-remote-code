@@ -1,14 +1,3 @@
-# OpenCode SSH Agent Self-Test Prompt
-
-Use this prompt only on a disposable, non-production SSH target and remote
-workdir. Start `opencode-ssh <alias> <absolute-remote-workdir>`, then paste the
-entire prompt below into the opened root session.
-
-The prompt tests only behavior the agent can observe through package tools. It
-must report visual permission/TUI behavior and human cancellation as not
-covered rather than claiming a pass.
-
-```text
 Проведи автономный безопасный self-test текущей сессии opencode-ssh.
 
 Это исполняемая проверка, а не описание плана. Ты обязан реально вызывать доступные package tools, проверять фактические результаты и сравнивать их с ожидаемыми значениями. Не симулируй tool calls и не ставь PASS без наблюдаемого evidence.
@@ -566,4 +555,3 @@ FINAL SUMMARY:
 6. Какие manual UI checks всё ещё обязательны.
 
 Начни выполнение сейчас с ST-01. Не отвечай планом.
-```
