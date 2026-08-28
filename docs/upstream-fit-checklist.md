@@ -66,11 +66,14 @@ passed 6/6 with resume disabled and fresh fallback. Exact binary
 `/tmp/opencode/opencode-ai-1.18.18/node_modules/opencode-ai/bin/opencode.exe`;
 the exact baseline accepted its six names with 6 passed, 0 failed, 0 skipped, and
 the resume scenario enabled. Every automated preflight used one `remote_status`
-SSH identity command and no separate Bash preflight. `npm test` passed 32
-unit/integration files and 453/453 tests, then 2 smoke files/tests passed 2/2;
-`npm pack --dry-run` passed with 166 files; and `git diff --check` passed.
+SSH identity command and no separate Bash preflight. Installed 1.18.25 fresh
+Task and exact 1.18.18 fresh/resume paths accepted a TUI-shaped omitted root
+permission overlay while retaining explicit child arrays; this does not prove
+visual TUI behavior. `npm test` passed 32 unit/integration files and 456/456
+tests, then 2 smoke files/tests passed 2/2; `npm pack --dry-run` passed with 165
+files; and `git diff --check` passed.
 
-The focused merged diagnostics/lifecycle gate passed 100/100, and the complete
+The focused merged diagnostics/lifecycle gate passed 101/101, and the complete
 installed-loader gate passed 3/3 with zero skips. The actual target-free
 no-listener self-test held valid health decoys on every resolved localhost
 loopback address at port 4096, saw zero connections/requests, and reported
@@ -90,7 +93,7 @@ opencode-ssh self-test
 
 ## Startup Diagnostics Check
 
-The reusable logger is best-effort and startup-only. Its default path is:
+The reusable logger is best-effort and startup-focused. Its default path is:
 
 ```text
 ${XDG_STATE_HOME:-$HOME/.local/state}/opencode-ssh/logs/opencode-ssh-YYYY-MM-DD.jsonl
@@ -129,6 +132,10 @@ For a reviewed local test profile:
    native filesystem request or universal process settlement. Verify logging
    failure does not replace the core result and critical cleanup/disposal starts
    before any awaited diagnostic write.
+8. With a caller root whose optional session permission overlay is omitted,
+   verify one `plugin.task_root_permission.normalized` warning is emitted at most
+   once for the launch. It must contain only the standard correlation envelope,
+   with no session/task/permission IDs, policy content, paths, or per-call count.
 
 ## Remote Test Directory
 
@@ -237,6 +244,8 @@ Positive qualification on a release-qualified launch:
 2. From one preflighted root, launch a fresh foreground direct child. Require its
    own `remote_status`, let it complete successfully, and preserve the exact
    returned `task_id` together with its `subagent_type`.
+   Exercise the normal TUI-shaped omitted root permission overlay and verify it
+   fingerprints as `[]`; an explicit malformed root value must still fail.
    Verify fresh admission is one-shot and registration binds unchanged root
    permission/security-epoch evidence, preserves inherited SSH-project denies,
    and requires explicit matching child agent and permission array.

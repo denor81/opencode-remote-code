@@ -757,21 +757,120 @@ describe("server plugin registration", () => {
   it("accepts a matching unqualified runtime while keeping Task resume disabled", async () => {
     const fixture = await createPluginFixture("1.18.19")
     process.env[REMOTE_ENV.taskResumeCapability] = TASK_RESUME_PROTOCOL
+    const sessionGet = vi.fn(async () => ({ data: { id: "root" } }))
     const hooks = await RemoteCodePlugin.server(
-      pluginInput(vi.fn(), "1.18.19"),
+      pluginInput(sessionGet, "1.18.19"),
       pluginOptions(fixture, { taskResumeCapability: TASK_RESUME_PROTOCOL })
     )
 
     try {
-      await hooks.config?.({} as never)
+      delete process.env.FAKE_SSH_FAIL_UNMATCHED
+      await hooks.config?.({ permission: { remote_status: "allow" } } as never)
+      await completePluginPreflight(
+        hooks.tool!,
+        vi.fn(async () => undefined),
+        "root",
+        "build"
+      )
       const output = { system: [] as string[] }
       await hooks["experimental.chat.system.transform"]?.(
         { sessionID: "root", model: {} as never },
         output
       )
       expect(output.system.at(-1)).toContain("Task resume is disabled")
+      await expect(
+        hooks["tool.execute.before"]!(
+          { tool: "task", sessionID: "root", callID: "fresh-root" },
+          { args: { subagent_type: "general" } }
+        )
+      ).resolves.toBeUndefined()
+      await expect(
+        hooks["tool.execute.before"]!(
+          { tool: "task", sessionID: "root", callID: "resume-root" },
+          { args: { subagent_type: "general", task_id: "child" } }
+        )
+      ).rejects.toThrow(/resume.*disabled.*selected OpenCode/i)
     } finally {
       await hooks.dispose?.()
+    }
+  })
+
+  it("normalizes an omitted 1.18.25 root permission and logs once", async () => {
+    const fixture = await createPluginFixture("1.18.25")
+    const { logDirectory, startupID } = enablePluginLogging(fixture)
+    const privateRootID = "private-root-id"
+    const sessionGet = vi.fn(async () => ({ data: { id: privateRootID } }))
+    let hooks: Hooks | undefined
+
+    try {
+      hooks = await RemoteCodePlugin.server(
+        pluginInput(sessionGet, "1.18.25"),
+        pluginOptions(fixture)
+      )
+      delete process.env.FAKE_SSH_FAIL_UNMATCHED
+      await hooks.config?.({ permission: { remote_status: "allow" } } as never)
+      await completePluginPreflight(
+        hooks.tool!,
+        vi.fn(async () => undefined),
+        privateRootID,
+        "build"
+      )
+
+      for (const callID of ["first-private-call", "second-private-call"]) {
+        await hooks["tool.execute.before"]!(
+          { tool: "task", sessionID: privateRootID, callID },
+          { args: { subagent_type: "general" } }
+        )
+      }
+
+      const records = await waitForPluginLogEvents(logDirectory, [
+        "plugin.task_root_permission.normalized",
+      ])
+      const normalized = records.filter(
+        (record) => record.event === "plugin.task_root_permission.normalized"
+      )
+      expect(normalized).toHaveLength(1)
+      expect(normalized[0]).toEqual(
+        expect.objectContaining({
+          level: "warn",
+          fields: {
+            component: "server-plugin",
+            startupID,
+            launchID: fixture.launchID,
+            targetID: fixture.targetID,
+          },
+        })
+      )
+      expect(JSON.stringify(normalized[0])).not.toContain(privateRootID)
+      expect(JSON.stringify(normalized[0])).not.toContain("private-call")
+
+      await hooks.dispose?.()
+      hooks = await RemoteCodePlugin.server(
+        pluginInput(sessionGet, "1.18.25"),
+        pluginOptions(fixture)
+      )
+      await hooks.config?.({ permission: { remote_status: "allow" } } as never)
+      await completePluginPreflight(
+        hooks.tool!,
+        vi.fn(async () => undefined),
+        privateRootID,
+        "build"
+      )
+      await hooks["tool.execute.before"]!(
+        { tool: "task", sessionID: privateRootID, callID: "third-private-call" },
+        { args: { subagent_type: "general" } }
+      )
+      await delay(100)
+      const repeatedRecords = parseJsonLines<PluginLogRecord>(
+        await readFile(resolveDailyLogFilePath({ logDirectory }), "utf8")
+      )
+      expect(
+        repeatedRecords.filter(
+          (record) => record.event === "plugin.task_root_permission.normalized"
+        )
+      ).toHaveLength(1)
+    } finally {
+      await hooks?.dispose?.()
     }
   })
 
@@ -779,7 +878,7 @@ describe("server plugin registration", () => {
     const fixture = await createPluginFixture()
     process.env[REMOTE_ENV.taskResumeCapability] = TASK_RESUME_PROTOCOL
     const sessions = new Map<string, Record<string, unknown>>([
-      ["root", { id: "root", permission: [] }],
+      ["root", { id: "root" }],
       [
         "child",
         {

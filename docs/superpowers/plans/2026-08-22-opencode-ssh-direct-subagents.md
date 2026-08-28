@@ -289,7 +289,6 @@ behavior is available. Do not claim a gate that was not run.
 
 **Files:**
 - Modify: `README.md`
-- Modify: `README.zh-CN.md`
 - Modify: `docs/installation-and-usage.md`
 - Modify: `SECURITY.md`
 - Modify: `opencode-ssh-remote-use/opencode-ssh-safety.md`

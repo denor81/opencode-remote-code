@@ -367,7 +367,11 @@ inputs. The current instrumentation is deliberately narrow:
 - probe activation, runtime health, config, and marker publication;
 - production plugin session lookup, health source/version match, launch claim,
   mirror, pool, bootstrap, hook/config/ready, initialization failure, and
-  disposal.
+  disposal;
+- one at-most-once-per-launch `plugin.task_root_permission.normalized` warning
+  when an omitted caller-root permission overlay is accepted as empty. The
+  warning contains only the standard startup/launch/target correlation envelope
+  and is not per-call or per-session telemetry.
 
 Production records stable failure categories/codes and allowlisted fields. It
 does not write raw errors/messages, raw target alias/canonical workdir or project/
@@ -396,9 +400,9 @@ Event names must be stable and match `[A-Za-z0-9][A-Za-z0-9._:-]*`. Treat every
 field as an explicit allowlist decision; do not pass arbitrary objects or raw
 errors from production startup paths. Start critical cleanup, pool closure, or
 disposal before awaiting a log write so diagnostics cannot delay initiation of
-the security/lifecycle action. Keep this facility startup-focused rather than
-expanding it into project, tool, permission, session, model, or provider
-telemetry.
+the security/lifecycle action. Keep this facility startup-focused apart from the
+single compatibility signal above rather than expanding it into per-call
+project, tool, permission, session, model, or provider telemetry.
 
 ## Configure OpenSSH
 
@@ -463,6 +467,13 @@ Package-enforced Task behavior:
 - A runtime hook retrieves the caller and rejects Task unless it is a
   preflighted root. Every child Task call is rejected even if a trusted later
   config hook re-exposes Task.
+- OpenCode keeps global/per-agent policy separate from its optional
+  session-local permission overlay. An omitted caller-root
+  `session.permission` is normalized to an empty overlay for package
+  fingerprinting, matching OpenCode's own effective permission merge. This
+  grants nothing by itself. Explicit malformed root permissions, incompatible
+  root-session `ask` rules, changed root evidence, and missing or malformed
+  child permission arrays remain fail-closed.
 - `background: true` is unsupported. The launcher also forces
   `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=false`.
 - `task_id` is accepted only under the package-controlled same-launch resume
@@ -848,7 +859,7 @@ Final verified 2026-08-28 evidence is:
 - `npm run lint` passed, and `npm run build` passed repeatedly.
 - The actual installed OpenCode 1.18.25 self-test passed; Task resume was
   disabled.
-- The focused merged diagnostics/lifecycle gate passed 100/100.
+- The focused merged diagnostics/lifecycle gate passed 101/101.
 - The complete installed-loader gate passed 3/3 with zero skips. Its actual
   target-free self-test held valid health decoys on every resolved localhost
   loopback address at port 4096, saw zero connections/requests, and reported
@@ -868,9 +879,12 @@ Final verified 2026-08-28 evidence is:
   with the expected final content.
 - Every automated root, child, and resumed-child preflight used one
   `remote_status` SSH identity command and no separate Bash preflight.
-- `npm test` passed 32 unit/integration files and 453/453 tests, then 2 smoke
+- Installed 1.18.25 fresh Task and exact 1.18.18 fresh/resume paths accepted the
+  normal TUI-shaped omitted root permission overlay while retaining explicit
+  child permission arrays. This API-shaped evidence is not a visual TUI gate.
+- `npm test` passed 32 unit/integration files and 456/456 tests, then 2 smoke
   files/tests passed 2/2.
-- `npm pack --dry-run` passed with 166 files listed, and `git diff --check`
+- `npm pack --dry-run` passed with 165 files listed, and `git diff --check`
   passed.
 - The actual installed-loader integration used a real OpenCode serve process on
   a dynamically selected, test-only IPv4-loopback port. In serve mode the

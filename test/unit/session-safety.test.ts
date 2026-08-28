@@ -383,6 +383,7 @@ describe("direct Task runtime guard", () => {
     ["reported error", { error: { message: "not found" } }],
     ["mismatched ID", { data: { id: "other" } }],
     ["invalid parent", { data: { id: "root", parentID: null } }],
+    ["null permissions", { data: { id: "root", permission: null } }],
     ["invalid permissions", { data: { id: "root", permission: "ask" } }],
     [
       "invalid permission rule",
@@ -426,14 +427,37 @@ describe("direct Task runtime guard", () => {
     await expect(runTaskGuard(guard, "root", {})).rejects.toThrow(/preflight/i)
   })
 
-  it("requires an explicit caller root permission array", async () => {
+  it("normalizes an omitted caller root permission array", async () => {
     const safety = new SessionSafety(REMOTE_WORKDIR)
     completePreflight(safety, "root")
     const guard = createTaskGuard(client(sessionLookup({ id: "root" })), safety)
 
-    await expect(runTaskGuard(guard, "root", {})).rejects.toThrow(
-      /caller root session.*explicit permission array/i
+    await expect(runTaskGuard(guard, "root", {})).resolves.toBeUndefined()
+  })
+
+  it("reports an omitted root permission once without affecting admission", async () => {
+    const safety = new SessionSafety(REMOTE_WORKDIR)
+    completePreflight(safety, "root")
+    const onRootPermissionNormalized = vi.fn(() => {
+      throw new Error("diagnostic unavailable")
+    })
+    const hooks = createTaskHooks(
+      client(sessionLookup({ id: "root" })),
+      safety,
+      false,
+      undefined,
+      {
+        onRootPermissionNormalized,
+      }
     )
+
+    await expect(
+      runTaskBefore(hooks, "root", { subagent_type: "general" }, "first")
+    ).resolves.toBeUndefined()
+    await expect(
+      runTaskBefore(hooks, "root", { subagent_type: "explore" }, "second")
+    ).resolves.toBeUndefined()
+    expect(onRootPermissionNormalized).toHaveBeenCalledOnce()
   })
 
   it("reports task_id resume as disabled for an unqualified OpenCode", async () => {
@@ -1185,8 +1209,11 @@ describe("safe same-launch Task resume", () => {
     ],
     [
       "permissions",
-      { id: "root", permission: undefined },
-      /caller root session.*explicit permission array/i,
+      {
+        id: "root",
+        permission: [{ permission: "read", pattern: "*", action: "deny" }],
+      },
+      /security permissions changed/i,
     ],
     [
       "incompatible ask rules",

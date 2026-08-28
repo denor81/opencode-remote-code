@@ -46,10 +46,11 @@ interchangeable evidence boundaries.
 | Exact sixth Task scenario | Root used the model-visible Task result ID and cross-checked the actual child; an identical package write was blocked before renewed preflight with zero SSH/SFTP preparation; one renewed `remote_status` then completed atomic fake-SFTP get, private put, and `mv -fT --` with expected final content |
 | One-step package preflight | Every automated root, direct child, and resumed child used one `remote_status` SSH invocation of `hostname; whoami; pwd -P`; no separate Bash preflight tool call or `bash` permission was used |
 | Installed real-Task fake-SFTP mutation | Pass in the exact sixth scenario; this is real installed OpenCode Task with fake SFTP transport, not real-host SFTP evidence |
+| Omitted root permission overlay | Installed OpenCode 1.18.25 fresh Task and exact 1.18.18 fresh/resume paths accepted the normal TUI-shaped omitted root overlay as `[]` while retaining explicit child arrays; this API-shaped evidence is not a visual/default-TUI gate |
 | Actual installed loader integration | Pass, 3/3 with zero skips; launches a real OpenCode serve process on a dynamically selected, test-only IPv4-loopback port, observes runtime health through the host-configured SDK transport using that process-owned listener, crosses plugin activation and the 25 ms stable-ready boundary, and verifies production activation/disposal with correlated startup logs; no fixed fixture port is trusted by production, the pre-SSH probe remains no-listener `opencode debug config`, and SSH/SFTP transport is fake |
-| `npm test` | Pass; 32 unit/integration files and 453/453 tests, then 2 smoke files/tests passed 2/2 |
+| `npm test` | Pass; 32 unit/integration files and 456/456 tests, then 2 smoke files/tests passed 2/2 |
 | `npm run test:smoke` | Pass; 2/2 |
-| `npm pack --dry-run` | Pass; 166 files listed; volatile tarball hashes and sizes are not release claims |
+| `npm pack --dry-run` | Pass; 165 files listed; volatile tarball hashes and sizes are not release claims |
 | `git diff --check` | Pass |
 | `npm run test:real` | Not run |
 | Real-SSH two-sibling mutation | Pending approved disposable target |
@@ -72,11 +73,11 @@ These focused gates passed in the same final 2026-08-28 cycle:
 | --- | --- |
 | Lint and build | Pass |
 | Actual installed OpenCode self-test | Pass on 1.18.25; Task resume disabled |
-| Focused merged gate | 100/100 passed |
+| Focused merged gate | 101/101 passed |
 | Installed loader gate | 3/3 passed with zero skips |
 | Exact target-free no-listener self-test | Valid health decoys held every resolved localhost loopback address at port 4096; OpenCode made zero connections and zero requests; health used the configured in-process SDK path and reported `client._client.get` |
 | Real-serve production lifecycle | Activation, SDK-transport health through the process-owned listener, disposal, and cross-process correlated startup logs passed |
-| Logging contract | One private JSONL file per UTC day, activity-triggered pruning with no background timer, append/no-follow/nonblocking flags, record limit, best-effort deadline behavior, failure suppression, safe fields, and startup correlation passed focused coverage; maintenance keeps the current UTC day plus four previous days, while stale files may remain without later logging activity |
+| Logging contract | One private JSONL file per UTC day, activity-triggered pruning with no background timer, append/no-follow/nonblocking flags, record limit, best-effort deadline behavior, failure suppression, safe fields, startup correlation, and one allowlisted root-permission normalization warning at most once per launch passed focused coverage; maintenance keeps the current UTC day plus four previous days, while stale files may remain without later logging activity |
 
 The correlated records were limited to documented startup components and
 non-secret `startupID`, then `launchID`/`targetID`. `targetID` is the stable

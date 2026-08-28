@@ -331,16 +331,37 @@ export interface TaskHooks {
   }): void
 }
 
+export interface TaskHooksOptions {
+  onRootPermissionNormalized?: () => void
+}
+
 export function createTaskHooks(
   client: PluginInput["client"],
   safety: SessionSafety,
   taskResumeEnabled: boolean,
-  registry?: TaskResumeRegistry
+  registry?: TaskResumeRegistry,
+  options: TaskHooksOptions = {}
 ): TaskHooks {
   if (taskResumeEnabled !== (registry !== undefined)) {
     throw new Error("OpenCode SSH Task resume registry capability mismatch")
   }
   const securityEpochs = new SessionSecurityEpochs()
+  let rootPermissionNormalizationReported = false
+  const validateCallerRootPermissions = (
+    session: OpenCodeSession
+  ): RootSecurityEvidence =>
+    validateRootPermissions(
+      session,
+      () => {
+        if (rootPermissionNormalizationReported) return
+        rootPermissionNormalizationReported = true
+        try {
+          options.onRootPermissionNormalized?.()
+        } catch {
+          // Diagnostics must not affect Task admission.
+        }
+      }
+    )
 
   const before: TaskHooks["before"] = async (input, output) => {
     if (input.tool !== "task") return
@@ -362,7 +383,7 @@ export function createTaskHooks(
     }
 
     safety.requirePreflight(session.id)
-    const ownerSecurity = validateRootPermissions(session)
+    const ownerSecurity = validateCallerRootPermissions(session)
 
     if (!Object.hasOwn(output.args, "task_id")) {
       if (taskResumeEnabled) {
@@ -401,7 +422,8 @@ export function createTaskHooks(
     const currentOwner = await lookupSession(client, session.id, "caller")
     const currentOwnerSecurity = validateResumeOwner(
       currentOwner,
-      ready
+      ready,
+      validateCallerRootPermissions
     )
     securityEpochs.requireCurrent(
       taskID,
@@ -456,7 +478,8 @@ export function createTaskHooks(
       )
       const ownerSecurity = validateResumeOwner(
         currentOwner,
-        reservation
+        reservation,
+        validateCallerRootPermissions
       )
       securityEpochs.requireCurrent(
         reservation.childID,
@@ -514,7 +537,12 @@ export function createTaskHooks(
         freshAdmission.ownerRootID,
         "caller"
       )
-      validateFreshOwner(currentOwner, freshAdmission, securityEpochs)
+      validateFreshOwner(
+        currentOwner,
+        freshAdmission,
+        securityEpochs,
+        validateCallerRootPermissions
+      )
       securityEpochs.requireCurrent(
         metadata.sessionID,
         childSecurityEpoch,
@@ -747,8 +775,15 @@ function validateRootTopology(session: OpenCodeSession): void {
   }
 }
 
-function validateRootPermissions(session: OpenCodeSession): RootSecurityEvidence {
-  const permission = requireSessionPermissions(session, "caller root session")
+function validateRootPermissions(
+  session: OpenCodeSession,
+  onNormalized: () => void
+): RootSecurityEvidence {
+  let permission = session.permission
+  if (permission === undefined) {
+    onNormalized()
+    permission = []
+  }
   const incompatibleAsk = permission.find(
     (rule) =>
       rule.action === "ask" &&
@@ -771,10 +806,11 @@ function validateRootPermissions(session: OpenCodeSession): RootSecurityEvidence
 
 function validateResumeOwner(
   owner: OpenCodeSession,
-  expected: TaskResumeSnapshot
+  expected: TaskResumeSnapshot,
+  validatePermissions: (session: OpenCodeSession) => RootSecurityEvidence
 ): RootSecurityEvidence {
   validateRootTopology(owner)
-  const evidence = validateRootPermissions(owner)
+  const evidence = validatePermissions(owner)
   validateOwnerPermissionFingerprint(evidence.permissionFingerprint, expected)
   return evidence
 }
@@ -782,10 +818,11 @@ function validateResumeOwner(
 function validateFreshOwner(
   owner: OpenCodeSession,
   admission: FreshTaskAdmission,
-  securityEpochs: SessionSecurityEpochs
+  securityEpochs: SessionSecurityEpochs,
+  validatePermissions: (session: OpenCodeSession) => RootSecurityEvidence
 ): RootSecurityEvidence {
   validateRootTopology(owner)
-  const evidence = validateRootPermissions(owner)
+  const evidence = validatePermissions(owner)
   if (
     evidence.permissionFingerprint !== admission.ownerPermissionFingerprint ||
     !sameProjection(

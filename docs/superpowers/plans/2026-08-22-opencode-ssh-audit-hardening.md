@@ -181,7 +181,6 @@ documents after verified behavior exists.
 **Primary files:**
 
 - Modify: `README.md`
-- Modify: `README.zh-CN.md`
 - Modify: `SECURITY.md`
 - Modify: `docs/installation-and-usage.md`
 - Modify: `docs/upstream-fit-checklist.md`

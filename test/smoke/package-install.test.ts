@@ -27,7 +27,6 @@ const requiredPackageFiles = [
   "LICENSE",
   "opencode-ssh-remote-use/opencode-ssh-safety.md",
   "README.md",
-  "README.zh-CN.md",
   "SECURITY.md",
   "UPSTREAM.md",
 ]
@@ -273,6 +272,7 @@ function isForbiddenPackageArtifact(file: string): boolean {
   return [
     /^(?:src|test|launchers)(?:\/|$)/u,
     /(?:^|\/)AGENTS\.md$/u,
+    /^README\.zh-CN\.md$/u,
     /(?:^|\/)pic\.png$/u,
     /^docs\/superpowers(?:\/|$)/u,
     /(?:^|\/)\.env(?:\.[^/]*)?$/u,

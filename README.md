@@ -210,7 +210,16 @@ Callable session lookup is required for every launch. Only explicitly
 release-qualified OpenCode 1.18.18 enables resume; another compatible loader and
 runtime version still permits fresh foreground direct Task but rejects every
 `task_id` before upstream execution. Generated system context reports the
-decision. When startup qualification enables resume, all of these rules apply:
+decision.
+
+OpenCode keeps global/per-agent policy separate from its optional session-local
+permission overlay. The package treats an omitted caller-root
+`session.permission` as an empty overlay, matching OpenCode's own effective
+permission merge. This grants nothing by itself. Explicit malformed root
+permissions, incompatible root-session `ask` rules, changed root evidence, and
+children without an explicit valid permission array still fail closed.
+
+When startup qualification enables resume, all of these rules apply:
 
 - The root may use only the exact `task_id` returned for a successfully
   completed foreground direct child created by that same root in the current
@@ -437,7 +446,11 @@ jq -c 'select(.fields.startupID == "<id>")' "<path>"
 
 Instrumentation is currently limited to compatibility version/probe, launcher
 SSH/canonicalization/OpenCode/ready/cleanup, probe health/marker, and production
-plugin lookup/health/source/version/mirror/pool/bootstrap/config/ready/disposal.
+plugin lookup/health/source/version/mirror/pool/bootstrap/config/ready/disposal,
+plus one at-most-once-per-launch
+`plugin.task_root_permission.normalized` warning when an omitted caller-root
+permission overlay is accepted as empty. That warning carries only the standard
+correlation fields and is not per-call telemetry.
 Records correlate first by non-secret `startupID`, then `launchID` and
 `targetID`. `targetID` is the stable pseudonymous SHA-256 of alias plus canonical
 workdir. It is not secret and is not claimed irreversible against guessed alias/
@@ -450,8 +463,9 @@ provider data. The only displayed path is the local diagnostic path above.
 Repository code can reuse `createFileLogger` from the relative `./logger.js`-
 style NodeNext path. Use stable event names matching
 `[A-Za-z0-9][A-Za-z0-9._:-]*`, allowlist non-secret fields, and start critical
-cleanup or disposal before awaiting a diagnostic write. This is startup
-diagnostics, not general project/tool/session telemetry.
+cleanup or disposal before awaiting a diagnostic write. This is
+startup-focused diagnostics with the single compatibility signal above, not
+general project/tool/session telemetry.
 
 ## Testing
 
@@ -477,7 +491,7 @@ passing with zero failed, skipped, or todo scenarios. Final evidence recorded on
 - `npm run lint` passed, and `npm run build` passed repeatedly.
 - The actual installed OpenCode 1.18.25 self-test passed; Task resume was
   disabled.
-- The focused merged diagnostics/lifecycle gate passed 100/100.
+- The focused merged diagnostics/lifecycle gate passed 101/101.
 - The complete installed-loader gate passed 3/3 with zero skips. Its actual
   target-free self-test held valid health decoys on every resolved localhost
   loopback address at port 4096, saw zero connections and requests, and observed
@@ -498,9 +512,12 @@ passing with zero failed, skipped, or todo scenarios. Final evidence recorded on
   put, and `mv -fT --` with the expected final content.
 - Every automated root, child, and resumed-child preflight used one
   `remote_status` SSH identity command and no separate Bash preflight.
-- `npm test` passed 32 unit/integration files and 453/453 tests, then 2 smoke
+- Installed 1.18.25 fresh Task and exact 1.18.18 fresh/resume paths accepted the
+  normal TUI-shaped omitted root permission overlay while retaining explicit
+  child permission arrays. This API-shaped evidence is not a visual TUI gate.
+- `npm test` passed 32 unit/integration files and 456/456 tests, then 2 smoke
   files/tests passed 2/2.
-- `npm pack --dry-run` passed with 166 files listed, and `git diff --check`
+- `npm pack --dry-run` passed with 165 files listed, and `git diff --check`
   passed.
 - The actual installed-loader integration used a real OpenCode serve process on
   a dynamically selected, test-only IPv4-loopback port. The host-configured SDK

@@ -104,6 +104,15 @@ every child Task call, and `background: true`. The launcher also forces
 `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=false`. This guard is a backstop even
 if a trusted later config hook changes the primary-tool catalog.
 
+OpenCode stores global and per-agent permissions separately from the optional
+session-local permission overlay. An omitted caller-root `session.permission`
+is therefore normalized to an empty overlay for fingerprinting and inherited
+deny projection, matching OpenCode's own `session.permission ?? []` behavior.
+This does not grant permissions: global and agent policy still applies. An
+explicit malformed root value, an incompatible root-session `ask`, changed root
+evidence, or a child without an explicit valid permission array remains
+fail-closed.
+
 Task resume is a package capability, not a general promise about OpenCode's
 `task_id` behavior. Callable `client.session.get` is a launch requirement, not
 the resume discriminator. Each launch enables resume only for explicitly
@@ -288,10 +297,14 @@ which may finish later on pathological or non-local storage; it is not universal
 bounded-process-settlement evidence. Every logging failure is suppressed and
 never replaces the core operation result.
 
-Instrumentation is intentionally startup-only: compatibility version/probe;
+Instrumentation is intentionally startup-focused: compatibility version/probe;
 launcher SSH, canonicalization, OpenCode, ready, and cleanup; probe health and
 marker publication; and production plugin lookup, health source/version,
-mirror, pool, bootstrap, config, ready, and disposal. Non-secret `startupID`
+mirror, pool, bootstrap, config, ready, and disposal. The only runtime
+compatibility signal is an at-most-once-per-launch
+`plugin.task_root_permission.normalized` warning when an omitted caller-root
+permission overlay is accepted as empty. It contains only the standard
+correlation envelope. Non-secret `startupID`
 correlates processes, followed by `launchID` and `targetID`. `targetID` is the
 stable pseudonymous SHA-256 of alias plus canonical workdir. It is not secret and
 is not claimed irreversible against guessed alias/workdir inputs. Production
@@ -308,7 +321,7 @@ remain trusted and can read that private local file.
 Future callers must use stable event names matching
 `[A-Za-z0-9][A-Za-z0-9._:-]*` and reviewed non-secret fields. Critical cleanup
 or disposal must start before awaiting diagnostics. The logger must not become
-project, tool, permission, session, model, or provider telemetry.
+per-call project, tool, permission, session, model, or provider telemetry.
 
 ## Live Command Output
 
@@ -353,14 +366,16 @@ Final 2026-08-28 automated evidence passed the exact OpenCode 1.18.18
 six-scenario manifest with safe same-launch resume and installed real-Task
 fake-SFTP mutation. Ordinary installed OpenCode 1.18.25 also passed 6/6 with
 resume disabled and fresh fallback. Every automated preflight used one
-`remote_status` identity SSH command and no separate Bash preflight. Formal
-direct-child release evidence remains incomplete only for real-SSH two-sibling
-mutation and real permission UI and direct-child TUI behavior;
+`remote_status` identity SSH command and no separate Bash preflight. The
+installed 1.18.25 fresh path and exact 1.18.18 fresh/resume paths accepted an
+omitted root permission overlay as empty while retaining explicit child arrays.
+Formal direct-child release evidence remains incomplete only for real-SSH
+two-sibling mutation and real permission UI and direct-child TUI behavior;
 `npm run test:real` was not run. Earlier `5/5` records are historical pre-resume
 evidence and are not the current six-scenario result.
 
 The same final cycle's focused runtime-health/logging evidence passed lint/build,
-actual OpenCode 1.18.25 self-test with Task resume disabled, a merged 100/100
+actual OpenCode 1.18.25 self-test with Task resume disabled, a merged 101/101
 gate, and installed-loader 3/3 with zero skips. The target-free localhost:4096
 decoys saw zero connections/requests and the observer reported
 `client._client.get`; real-serve activation/disposal and correlated logs also

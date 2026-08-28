@@ -333,6 +333,12 @@ as fresh-child requests. Cross-launch, foreign-root, unknown/invented,
 child-initiated, background, busy, failed, canceled, and uncertain resume
 attempts are not allowed.
 
+OpenCode may omit the root session's optional permission overlay while applying
+global and agent policy separately. Package code treats that omitted root field
+as an empty overlay; it is not an allow rule. Explicit malformed root policy,
+incompatible root-session asks, changed root evidence, and missing child
+permission arrays still fail closed.
+
 Before atomically reserving one resumer, the package revalidates exact launch,
 caller root, direct child, type, observed agent, root/child permissions, and
 security epochs.

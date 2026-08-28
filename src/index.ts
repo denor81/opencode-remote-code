@@ -44,6 +44,7 @@ import { createStatusTool } from "./tools/status.js"
 import { createWriteTool } from "./tools/write.js"
 
 const launchOwners = new Map<string, symbol>()
+const rootPermissionNormalizationLoggedLaunches = new Set<string>()
 
 const RemoteCodePlugin: Plugin = async (_input, options) => {
   const probe = activateCompatibilityProbe(_input, options)
@@ -128,7 +129,23 @@ const RemoteCodePlugin: Plugin = async (_input, options) => {
       _input.client,
       sessionSafety,
       config.taskResumeEnabled,
-      taskResumeRegistry
+      taskResumeRegistry,
+      {
+        onRootPermissionNormalized() {
+          if (
+            !diagnostics ||
+            rootPermissionNormalizationLoggedLaunches.has(config.launchID)
+          ) {
+            return
+          }
+          rootPermissionNormalizationLoggedLaunches.add(config.launchID)
+          void logProduction(
+            diagnostics,
+            "warn",
+            "plugin.task_root_permission.normalized"
+          )
+        },
+      }
     )
 
     stage = "bootstrap"

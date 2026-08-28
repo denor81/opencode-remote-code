@@ -118,12 +118,21 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
             {
               title: "Hermetic root Task fixture",
               agent: "build",
-              permission: allowAllPermission(),
             },
             { signal: AbortSignal.timeout(30_000) }
           ),
           "create root session"
         )
+        expect(root.permission).toBeUndefined()
+        expect(
+          requireData<Session>(
+            await fixture.client.session.get(
+              { sessionID: root.id },
+              { signal: AbortSignal.timeout(10_000) }
+            ),
+            "reload root session"
+          ).permission
+        ).toBeUndefined()
 
         const ready = await fixture.waitForReady()
         expect(ready).toMatchObject({
@@ -160,6 +169,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         expect(children).toHaveLength(1)
         const [child] = children
         expect(child).toMatchObject({ parentID: root.id, agent: "general" })
+        expect(child.permission).toEqual(expect.any(Array))
         const rootMessages = requireData<Array<{ info: MessageInfo; parts: Part[] }>>(
           await fixture.client.session.messages(
             { sessionID: root.id },
@@ -736,11 +746,8 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         })
         expect(fixture.taskResumeEnabled).toBe(expectedTaskResumeEnabled)
 
-        const root = await createReadyRoot(
-          fixture,
-          "Same-launch resume fixture",
-          allowAllPermission()
-        )
+        const root = await createReadyRoot(fixture, "Same-launch resume fixture")
+        expect(root.permission).toBeUndefined()
         const result = requireData<{ info: unknown; parts: Part[] }>(
           await fixture.client.session.prompt(
             rootPrompt(root.id, RESUME_ROOT_PROMPT),
