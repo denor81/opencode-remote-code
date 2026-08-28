@@ -3,22 +3,51 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import { PROBE_ENV, PROBE_PROTOCOL, type ProbeRecord } from "./opencode-probe.js"
+import {
+  LOGGER_CHILD_ENV,
+  type FileLogger,
+  type LogLevel,
+} from "./logger.js"
+import {
+  PROBE_ENV,
+  parseProbeMarker,
+  safeStartupErrorCode,
+  type LoaderProbeObservation,
+} from "./opencode-probe.js"
+import { isOpenCodeVersion } from "./opencode-runtime-version.js"
 import {
   ProcessError,
   spawnManaged,
   spawnProcess,
   type ProcessResult,
 } from "./process.js"
+import {
+  TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+  isTaskResumeQualified,
+} from "./task-resume-capability.js"
 
 const PROBE_TIMEOUT_MS = 5_000
 const PROBE_OUTPUT_BYTES = 4_096
 const LOADER_PROBE_TIMEOUT_MS = 30_000
-const PLAIN_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u
 
 export interface OpenCodeCompatibilityHooks {
   writeProgress?: (message: string) => void
   writeWarning?: (message: string) => void
+}
+
+export interface OpenCodeCompatibilityResult {
+  detectedVersion: string
+  loaderRuntimeVersion: string
+  loaderRuntimeVersionSource: LoaderProbeObservation["loaderRuntimeVersionSource"]
+  callableSessionLookupObservedInLoaderProcess: boolean
+  taskResumeQualified: boolean
+}
+
+export interface OpenCodeCompatibilityDiagnostics {
+  logger: FileLogger
+  logDirectory: string
+  onWrite?: () => void
+  startupID: string
 }
 
 interface OpenCodePreflightOptions {
@@ -27,46 +56,127 @@ interface OpenCodePreflightOptions {
   signal: AbortSignal
   testedVersion: string
   pluginURL: URL
+  diagnostics?: OpenCodeCompatibilityDiagnostics
   writeProgress?: (message: string) => void
   writeWarning?: (message: string) => void
 }
 
 export async function runOpenCodeCompatibilityCheck(
   options: OpenCodePreflightOptions
-): Promise<void> {
+): Promise<OpenCodeCompatibilityResult> {
   const startedAt = Date.now()
-  options.writeProgress?.("checking OpenCode compatibility...")
-
-  let version: string | undefined
+  let stage: CompatibilityFailureStage = "version-detection"
   try {
-    version = await detectOpenCodeVersion(options.binary, options.env, options.signal)
-  } catch (error) {
-    if (
-      error instanceof ProcessError &&
-      error.result === undefined &&
-      errnoIs(error.cause, "ENOENT")
-    ) {
-      throw new Error(
-        `OpenCode is required. Install the tested version with: npm install --global opencode-ai@${options.testedVersion}`,
-        { cause: error }
+    options.writeProgress?.("checking OpenCode compatibility...")
+    await logCompatibility(options, "info", "compatibility.version_detection.started")
+
+    let version: string | undefined
+    try {
+      version = await detectOpenCodeVersion(options.binary, options.env, options.signal)
+    } catch (error) {
+      if (
+        error instanceof ProcessError &&
+        error.result === undefined &&
+        errnoIs(error.cause, "ENOENT")
+      ) {
+        throw new Error(
+          `OpenCode is required. Install the tested version with: npm install --global opencode-ai@${options.testedVersion}`,
+          { cause: error }
+        )
+      }
+      throw error
+    }
+    await logCompatibility(
+      options,
+      "info",
+      "compatibility.version_detection.completed",
+      version ? { detectedVersion: version } : { detected: false }
+    )
+    if (!version) {
+      throw compatibilityError("version could not be determined")
+    }
+
+    stage = "loader-probe"
+    options.writeProgress?.(`testing OpenCode ${version} plugin loader...`)
+    await logCompatibility(options, "info", "compatibility.probe.started", {
+      detectedVersion: version,
+    })
+    const loaderObservation = await runLoaderProbe(options)
+    const {
+      loaderRuntimeVersion,
+      loaderRuntimeVersionSource,
+      callableSessionLookupObservedInLoaderProcess,
+    } = loaderObservation
+    await logCompatibility(options, "info", "compatibility.probe.completed", {
+      loaderRuntimeVersion,
+      loaderRuntimeVersionSource,
+      callableSessionLookup: callableSessionLookupObservedInLoaderProcess,
+    })
+
+    stage = "version-match"
+    if (version !== loaderRuntimeVersion) {
+      throw compatibilityError(
+        `reported OpenCode version ${JSON.stringify(version)} did not match loader runtime version ${JSON.stringify(loaderRuntimeVersion)}`
       )
     }
-    throw error
-  }
-  if (!version) {
-    throw compatibilityError("version could not be determined")
-  }
+    await logCompatibility(options, "info", "compatibility.version_match.completed", {
+      detectedVersion: version,
+      loaderRuntimeVersion,
+      matches: true,
+    })
 
-  options.writeProgress?.(`testing OpenCode ${version} plugin loader...`)
-  await runLoaderProbe(options)
-  options.writeProgress?.(
-    `compatibility passed (${((Date.now() - startedAt) / 1_000).toFixed(1)}s)`
-  )
+    stage = "session-lookup"
+    if (!callableSessionLookupObservedInLoaderProcess) {
+      throw compatibilityError(
+        "plugin loader did not expose callable client.session.get required for Task safety"
+      )
+    }
+    await logCompatibility(options, "info", "compatibility.session_lookup.completed", {
+      callable: true,
+    })
 
-  if (version !== options.testedVersion) {
-    options.writeWarning?.(
-      `OpenCode ${version} passed the loader check but differs from the tested version ${options.testedVersion}; visual TUI checks remain required.`
+    const taskResumeQualified = isTaskResumeQualified(
+      version,
+      loaderRuntimeVersion,
+      callableSessionLookupObservedInLoaderProcess
     )
+    options.writeProgress?.(
+      `compatibility passed (${((Date.now() - startedAt) / 1_000).toFixed(1)}s)`
+    )
+
+    if (version !== options.testedVersion) {
+      options.writeWarning?.(
+        `OpenCode ${version} passed the loader check but differs from the tested version ${options.testedVersion}; visual TUI checks remain required.${taskResumeQualified ? "" : " Task resume is disabled."}`
+      )
+    } else if (!taskResumeQualified) {
+      options.writeWarning?.(
+        `OpenCode ${version} passed the loader check but is not the release-qualified Task resume version ${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}; Task resume is disabled.`
+      )
+    }
+
+    void logCompatibility(options, "info", "compatibility.completed", {
+      detectedVersion: version,
+      loaderRuntimeVersion,
+      loaderRuntimeVersionSource,
+      callableSessionLookup: callableSessionLookupObservedInLoaderProcess,
+      taskResumeQualified,
+      durationMs: Date.now() - startedAt,
+    })
+    return {
+      detectedVersion: version,
+      loaderRuntimeVersion,
+      loaderRuntimeVersionSource,
+      callableSessionLookupObservedInLoaderProcess,
+      taskResumeQualified,
+    }
+  } catch (error) {
+    await logCompatibility(
+      options,
+      "error",
+      "compatibility.failed",
+      safeCompatibilityFailureFields(stage, error)
+    )
+    throw error
   }
 }
 
@@ -81,6 +191,7 @@ async function detectOpenCodeVersion(
     timeoutMs: PROBE_TIMEOUT_MS,
     maxStdoutBytes: PROBE_OUTPUT_BYTES,
     maxStderrBytes: PROBE_OUTPUT_BYTES,
+    terminationMode: "process-group",
     stdio: { stdin: "ignore", stdout: "capture", stderr: "capture" },
   })
   throwIfAborted(signal)
@@ -99,14 +210,16 @@ async function detectOpenCodeVersion(
   if (
     result.termination === null &&
     !result.stdoutTruncated &&
-    PLAIN_VERSION.test(stdout)
+    isOpenCodeVersion(stdout)
   ) {
     return stdout
   }
   return undefined
 }
 
-async function runLoaderProbe(options: OpenCodePreflightOptions): Promise<void> {
+async function runLoaderProbe(
+  options: OpenCodePreflightOptions
+): Promise<LoaderProbeObservation> {
   const root = await mkdtemp(path.join(os.tmpdir(), "opencode-ssh-probe-"))
   try {
     const probeConfigHome = path.resolve(
@@ -170,6 +283,12 @@ async function runLoaderProbe(options: OpenCodePreflightOptions): Promise<void> 
       [PROBE_ENV.resultPath]: resultPath,
     }
     copyNpmEnvironment(options.env, childEnv)
+    if (options.diagnostics) {
+      childEnv[LOGGER_CHILD_ENV.directory] =
+        options.diagnostics.logDirectory
+      childEnv[LOGGER_CHILD_ENV.startupID] =
+        options.diagnostics.startupID
+    }
 
     const probeProcess = spawnManaged(options.binary, ["debug", "config"], {
       cwd: directories.workspace,
@@ -178,10 +297,16 @@ async function runLoaderProbe(options: OpenCodePreflightOptions): Promise<void> 
       killGraceMs: 1_000,
       maxStdoutBytes: PROBE_OUTPUT_BYTES,
       maxStderrBytes: PROBE_OUTPUT_BYTES,
+      terminationMode: "process-group",
       stdio: { stdin: "ignore", stdout: "capture", stderr: "capture" },
     })
     try {
-      await waitForProbeRecord(resultPath, token, probeProcess.result, options.signal)
+      return await waitForProbeRecord(
+        resultPath,
+        token,
+        probeProcess.result,
+        options.signal
+      )
     } finally {
       const result = await probeProcess.terminate()
       if (
@@ -201,7 +326,7 @@ async function waitForProbeRecord(
   token: string,
   processResult: Promise<ProcessResult>,
   signal: AbortSignal
-): Promise<void> {
+): Promise<LoaderProbeObservation> {
   const deadline = Date.now() + LOADER_PROBE_TIMEOUT_MS
   let exited: ProcessResult | undefined
   let processFailure: unknown
@@ -224,10 +349,11 @@ async function waitForProbeRecord(
       } catch {
         throw compatibilityError("plugin loader returned an invalid result")
       }
-      if (!isProbeRecord(record, token)) {
+      const observation = parseProbeMarker(record, token)
+      if (!observation) {
         throw compatibilityError("plugin loader returned an invalid result")
       }
-      return
+      return observation
     } catch (error) {
       if (!errnoIs(error, "ENOENT")) throw error
     }
@@ -293,17 +419,94 @@ function copyNpmEnvironment(
   }
 }
 
-function isProbeRecord(value: unknown, token: string): value is ProbeRecord {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false
-  const record = value as Record<string, unknown>
-  return (
-    Object.keys(record).length === 2 &&
-    record.protocol === PROBE_PROTOCOL &&
-    record.token === token
-  )
-}
-
 function throwIfAborted(signal: AbortSignal): void {
   if (!signal.aborted) return
   throw signal.reason instanceof Error ? signal.reason : new Error("OpenCode launch aborted")
+}
+
+type CompatibilityFailureStage =
+  | "version-detection"
+  | "loader-probe"
+  | "version-match"
+  | "session-lookup"
+
+async function logCompatibility(
+  options: OpenCodePreflightOptions,
+  level: LogLevel,
+  event: string,
+  fields: Readonly<Record<string, unknown>> = {}
+): Promise<boolean> {
+  const diagnostics = options.diagnostics
+  if (!diagnostics) return false
+  try {
+    const written = await diagnostics.logger.log({
+      level,
+      event,
+      fields: {
+        component: "compatibility",
+        startupID: diagnostics.startupID,
+        ...fields,
+      },
+    })
+    if (written) {
+      try {
+        diagnostics.onWrite?.()
+      } catch {
+        // Availability reporting is best-effort diagnostics only.
+      }
+    }
+    return written
+  } catch {
+    // Diagnostics must never change compatibility behavior.
+    return false
+  }
+}
+
+function safeCompatibilityFailureFields(
+  stage: CompatibilityFailureStage,
+  error: unknown
+): Readonly<Record<string, unknown>> {
+  const code =
+    safeStartupErrorCode(error) ?? safeStartupErrorCode(errorCause(error))
+  return {
+    stage,
+    errorCategory:
+      stage === "version-detection" || stage === "loader-probe"
+        ? "process"
+        : "compatibility",
+    errorName: safeErrorName(error),
+    ...(code ? { errorCode: code } : {}),
+  }
+}
+
+function safeErrorName(error: unknown): string {
+  let name: string
+  try {
+    if (!(error instanceof Error)) return "NonError"
+    name = error.name
+  } catch {
+    return "Error"
+  }
+  switch (name) {
+    case "AbortError":
+    case "AggregateError":
+    case "Error":
+    case "OpenCodeHealthResponseError":
+    case "ProcessError":
+    case "ProcessTerminationError":
+    case "RangeError":
+    case "SyntaxError":
+    case "TypeError":
+      return name
+    default:
+      return "Error"
+  }
+}
+
+function errorCause(error: unknown): unknown {
+  try {
+    return error instanceof Error ? error.cause : undefined
+  } catch {
+    return undefined
+  }
 }

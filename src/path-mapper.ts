@@ -22,6 +22,17 @@ export class PathMapper {
     return this.assertWithinMirror(local)
   }
 
+  /** Return the scoped, collision-free path stored in the local manifest. */
+  toLocalRelative(remotePath: string): string {
+    const relative = path.relative(path.resolve(this.mirrorBase), this.toLocal(remotePath))
+    if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error(
+        `Remote Code: remote path ${JSON.stringify(remotePath)} has no scoped local mapping`
+      )
+    }
+    return relative.split(path.sep).join(path.posix.sep)
+  }
+
   /** Convert a local mirror path back to its remote absolute path. */
   toRemote(localPath: string): string {
     const resolved = this.assertWithinMirror(localPath)

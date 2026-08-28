@@ -182,10 +182,13 @@ export class SshClient {
   }
 
   /** Resolve an existing absolute remote directory without interpolating it as shell code. */
-  async canonicalizeWorkdir(requested: string): Promise<string> {
+  async canonicalizeWorkdir(
+    requested: string,
+    signal?: AbortSignal
+  ): Promise<string> {
     validateAbsolutePosixPath("requested workdir", requested)
 
-    const result = await this.exec("pwd -P", { cwd: requested })
+    const result = await this.exec("pwd -P", { cwd: requested, signal })
     if (result.exitCode !== 0) {
       throw new SshClientError(
         `Remote workdir ${JSON.stringify(requested)} is not an existing directory (exit code ${result.exitCode})`,

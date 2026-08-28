@@ -1,4 +1,5 @@
 import {
+  ProcessError,
   spawnManaged,
   spawnProcess,
   type ManagedProcess,
@@ -139,20 +140,35 @@ export class ControlMaster {
       await controlMaster.waitUntilReady(signal)
       return controlMaster
     } catch (cause) {
-      await process.terminate().catch(() => undefined)
-      if (signal.aborted) throw abortedError(alias, socketPath, signal.reason)
-      if (cause instanceof ControlMasterError) throw cause
-      throw new ControlMasterError(
-        `Failed to start SSH ControlMaster for ${JSON.stringify(alias)}`,
-        alias,
-        socketPath,
-        { cause }
-      )
+      const primary = signal.aborted
+        ? abortedError(alias, socketPath, signal.reason)
+        : cause instanceof ControlMasterError
+          ? cause
+          : new ControlMasterError(
+              `Failed to start SSH ControlMaster for ${JSON.stringify(alias)}`,
+              alias,
+              socketPath,
+              { cause }
+            )
+      try {
+        await process.terminate()
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [primary, cleanupError],
+          `${primary.message}; ControlMaster startup cleanup also failed`,
+          { cause: primary }
+        )
+      }
+      throw primary
     }
   }
 
   get isClosed(): boolean {
     return this.closePromise !== undefined
+  }
+
+  get hasExited(): boolean {
+    return this.masterSettled
   }
 
   /** Resolve when the foreground master exits, or reject on a spawn failure. */
@@ -209,9 +225,22 @@ export class ControlMaster {
       ])
 
       if (completion.kind === "master") {
-        await check.terminate().catch(() => undefined)
+        let cleanupError: unknown
+        try {
+          await check.terminate()
+        } catch (error) {
+          cleanupError = error
+        }
         if (signal.aborted) throw abortedError(this.alias, this.socketPath, signal.reason)
-        throw this.masterCompletionError(completion)
+        const primary = this.masterCompletionError(completion)
+        if (cleanupError !== undefined) {
+          throw new AggregateError(
+            [primary, cleanupError],
+            `${primary.message}; readiness-check cleanup also failed`,
+            { cause: primary }
+          )
+        }
+        throw primary
       }
       if (signal.aborted) throw abortedError(this.alias, this.socketPath, signal.reason)
       if (completion.kind === "check-error") {
@@ -282,17 +311,45 @@ export class ControlMaster {
   }
 
   private async closeOnce(): Promise<void> {
-    await spawnProcess(this.sshBinary, controlArgs(this.socketPath, "exit", this.alias), {
-      env: this.options.env,
-      timeoutMs: this.options.closeTimeoutMs,
-      killGraceMs: this.options.killGraceMs,
-      maxStdoutBytes: 64 * 1024,
-      maxStderrBytes: 64 * 1024,
-    }).catch(() => undefined)
-
     if (this.masterSettled) return
-    const exited = await this.waitForMasterExit(this.options.closeTimeoutMs)
-    if (!exited) await this.master.terminate().catch(() => undefined)
+    const cleanupErrors: unknown[] = []
+    const args = controlArgs(this.socketPath, "exit", this.alias)
+    try {
+      const result = await spawnProcess(this.sshBinary, args, {
+        env: this.options.env,
+        timeoutMs: this.options.closeTimeoutMs,
+        killGraceMs: this.options.killGraceMs,
+        maxStdoutBytes: 64 * 1024,
+        maxStderrBytes: 64 * 1024,
+      })
+      if (!isSuccessful(result) && !this.masterSettled) {
+        cleanupErrors.push(
+          new ProcessError(
+            `SSH ControlMaster exit command failed (${describeExit(result)})`,
+            this.sshBinary,
+            args,
+            result
+          )
+        )
+      }
+    } catch (error) {
+      if (!this.masterSettled) cleanupErrors.push(error)
+    }
+
+    if (!this.masterSettled) {
+      const exited = await this.waitForMasterExit(this.options.closeTimeoutMs)
+      if (!exited) {
+        try {
+          await this.master.terminate()
+        } catch (error) {
+          cleanupErrors.push(error)
+        }
+      }
+    }
+
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(cleanupErrors, "SSH ControlMaster cleanup failed")
+    }
   }
 
   private async waitForMasterExit(timeoutMs: number): Promise<boolean> {

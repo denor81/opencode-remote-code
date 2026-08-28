@@ -5,7 +5,10 @@ import { createTwoFilesPatch, diffLines } from "diff"
 import type { RemoteConfig } from "../config.js"
 import { trimDiff } from "../diff-utils.js"
 import type { PathMapper } from "../path-mapper.js"
-import type { RemotePathResolver } from "../remote-path-resolver.js"
+import type {
+  RemotePathResolver,
+  ResolvedMutationPath,
+} from "../remote-path-resolver.js"
 import { remotePermissionPattern } from "../remote-path.js"
 import { assertValidRemotePath, normalizeRemotePath } from "../remote-path.js"
 import type { SyncEngine } from "../sync-engine.js"
@@ -31,6 +34,7 @@ export interface UpdateFileChunk {
 interface PatchPlan {
   kind: "add" | "update"
   path: string
+  mutationPath: ResolvedMutationPath
   apply: (content: string) => string
 }
 
@@ -573,6 +577,7 @@ export function createPatchTool(
       }
 
       const involvedPaths = Array.from(new Set(files.map((file) => file.path))).sort()
+      const mutationPaths = files.map((file) => file.mutationPath)
 
       return syncEngine.transaction(async (transaction) => {
         const planned = new Map<
@@ -638,9 +643,7 @@ export function createPatchTool(
           patterns: involvedPaths.map((remotePath) =>
             remotePermissionPattern(pathMapper.remoteRoot, remotePath)
           ),
-          always: involvedPaths.map((remotePath) =>
-            remotePermissionPattern(pathMapper.remoteRoot, remotePath)
-          ),
+          always: [],
           metadata: {
             diff: diffPreview,
             executor: "ssh",
@@ -670,7 +673,7 @@ export function createPatchTool(
             remotePaths: involvedPaths,
           },
         }
-      })
+      }, ctx.abort, mutationPaths)
     },
   })
 }
@@ -716,14 +719,15 @@ async function parseAndPrepareUnified(
   for (const file of parsed) {
     const targetPath = file.newPath ?? file.oldPath
     if (!targetPath) continue
-    const rp = await pathResolver.resolveMutation(
+    const mutationPath = await pathResolver.resolveMutation(
       normalizePatchPath(targetPath, config.remoteWorkdir, true),
       ctx
     )
     const hasNoNewlineMarker = detectNoNewlineAtEnd(file.hunks)
     result.push({
       kind: file.isNew ? "add" : "update",
-      path: rp,
+      path: mutationPath.remotePath,
+      mutationPath,
       apply: (content) => applyUnifiedDiff(content, file.hunks, hasNoNewlineMarker),
     })
   }
@@ -754,22 +758,26 @@ async function parseAndPrepareNative(
   }
 
   for (const hunk of hunks) {
-    const rp = await pathResolver.resolveMutation(
+    const mutationPath = await pathResolver.resolveMutation(
       normalizePatchPath(hunk.path, config.remoteWorkdir),
       ctx
     )
+    const remotePath = mutationPath.remotePath
     if (hunk.type === "add") {
       result.push({
         kind: "add",
-        path: rp,
+        path: remotePath,
+        mutationPath,
         apply: () => hunk.contents ?? "",
       })
     } else if (hunk.type === "update" && hunk.chunks) {
       const chunks = hunk.chunks
       result.push({
         kind: "update",
-        path: rp,
-        apply: (content) => deriveNewContentsFromChunks(rp, chunks, content).content,
+        path: remotePath,
+        mutationPath,
+        apply: (content) =>
+          deriveNewContentsFromChunks(remotePath, chunks, content).content,
       })
     }
   }

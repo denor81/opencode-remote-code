@@ -15,7 +15,7 @@ describe("RemotePathResolver", () => {
       expect(command).toBe("realpath -e -- /workspace/link/passwd")
       return commandResult("/etc/passwd\n")
     })
-    const ask = vi.fn(async () => undefined)
+    const ask = vi.fn<ToolContext["ask"]>(async () => undefined)
 
     const resolved = await new RemotePathResolver("/workspace", pool).resolveExisting(
       "link/passwd",
@@ -28,7 +28,7 @@ describe("RemotePathResolver", () => {
       expect.objectContaining({
         permission: "external_directory",
         patterns: ["/etc/passwd"],
-        always: ["/etc/passwd"],
+        always: [],
       })
     )
   })
@@ -44,20 +44,47 @@ describe("RemotePathResolver", () => {
       if (!result) throw new Error(`Unexpected command: ${command}`)
       return result
     })
-    const ask = vi.fn(async () => undefined)
+    const ask = vi.fn<ToolContext["ask"]>(async () => undefined)
 
     const resolved = await new RemotePathResolver("/workspace", pool).resolveMutation(
       "/workspace/link/new/child",
       toolContext(ask)
     )
 
-    expect(resolved).toBe("/etc/new/child")
+    expect(resolved.remotePath).toBe("/etc/new/child")
     expect(pool.commands).toEqual(Array.from(responses.keys()))
     expect(ask).toHaveBeenCalledOnce()
     expect(ask.mock.calls[0][0]).toMatchObject({
       permission: "external_directory",
       patterns: ["/etc/new/child"],
     })
+  })
+
+  it("revalidates a mutation path without opening another permission boundary", async () => {
+    let realpathCalls = 0
+    const pool = new FakePool((command) => {
+      expect(command).toBe("realpath -e -- /workspace/link/file.txt")
+      realpathCalls++
+      return commandResult(
+        realpathCalls === 1
+          ? "/workspace/first/file.txt\n"
+          : "/outside/second/file.txt\n"
+      )
+    })
+    const ask = vi.fn(async () => undefined)
+    const controller = new AbortController()
+    const resolved = await new RemotePathResolver("/workspace", pool).resolveMutation(
+      "/workspace/link/file.txt",
+      toolContext(ask, controller.signal)
+    )
+
+    expect(resolved.remotePath).toBe("/workspace/first/file.txt")
+    await expect(resolved.revalidate(controller.signal)).rejects.toMatchObject({
+      code: "REMOTE_PATH_CHANGED",
+      expectedPath: "/workspace/first/file.txt",
+      actualPath: "/outside/second/file.txt",
+    })
+    expect(ask).not.toHaveBeenCalled()
   })
 
   it("asks once before probing a lexical external path", async () => {

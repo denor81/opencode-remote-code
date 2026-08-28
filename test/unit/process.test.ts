@@ -1,10 +1,24 @@
-import { describe, expect, it } from "vitest"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   ProcessError,
+  ProcessTerminationError,
   spawnChecked,
   spawnManaged,
   spawnProcess,
 } from "../../src/process.js"
+
+const temporaryDirectories: string[] = []
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) =>
+      rm(directory, { recursive: true, force: true })
+    )
+  )
+})
 
 describe("process helpers", () => {
   it("preserves adversarial arguments as literal argv entries", async () => {
@@ -156,4 +170,114 @@ describe("process helpers", () => {
         (result.exitCode === null && result.signal === "SIGTERM")
     ).toBe(true)
   })
+
+  it.skipIf(process.platform === "win32")(
+    "terminates an owned process group including a TERM-resistant descendant",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "process-tree-test-"))
+      temporaryDirectories.push(directory)
+      const descendantReadyPath = join(directory, "descendant.pid")
+      const descendantScript = [
+        'const { writeFileSync } = require("node:fs")',
+        'process.on("SIGTERM", () => {})',
+        'writeFileSync(process.argv[1], `${process.pid}\\n`)',
+        "setInterval(() => {}, 1000)",
+      ].join(";")
+      const parentScript = [
+        'const { spawn } = require("node:child_process")',
+        'process.on("SIGTERM", () => {})',
+        `spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}, process.argv[1]], { stdio: "ignore" })`,
+        "setInterval(() => {}, 1000)",
+      ].join(";")
+      const child = spawnManaged(
+        process.execPath,
+        ["-e", parentScript, descendantReadyPath],
+        { terminationMode: "process-group", killGraceMs: 50 }
+      )
+      const childPid = child.pid
+      expect(childPid).toEqual(expect.any(Number))
+      const descendantPid = Number((await waitForFile(descendantReadyPath)).trim())
+
+      try {
+        const result = await child.terminate()
+
+        expect(result).toMatchObject({
+          signal: "SIGKILL",
+          termination: "requested",
+        })
+        await expectProcessGone(childPid!)
+        await expectProcessGone(descendantPid)
+      } finally {
+        terminatePid(descendantPid)
+        terminatePid(childPid!)
+      }
+    }
+  )
+
+  it.skipIf(process.platform === "win32")(
+    "reports non-ESRCH process-group signal failures after bounded attempts",
+    async () => {
+      const child = spawnManaged(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { terminationMode: "process-group", killGraceMs: 20 }
+      )
+      const childPid = child.pid
+      expect(childPid).toEqual(expect.any(Number))
+      const originalKill = process.kill.bind(process)
+      const signalFailure = Object.assign(new Error("injected signal failure"), {
+        code: "EPERM",
+      })
+      const kill = vi.spyOn(process, "kill").mockImplementation(
+        ((pid: number, signal?: NodeJS.Signals | number) => {
+          if (pid < 0) throw signalFailure
+          return originalKill(pid, signal)
+        }) as typeof process.kill
+      )
+
+      try {
+        const error = await child.terminate().catch((value: unknown) => value)
+
+        expect(error).toBeInstanceOf(ProcessTerminationError)
+        expect((error as ProcessTerminationError).failures).toHaveLength(3)
+        expect((error as Error).message).toMatch(/owned process group/i)
+      } finally {
+        kill.mockRestore()
+        terminatePid(childPid!)
+        await expectProcessGone(childPid!)
+      }
+    }
+  )
 })
+
+async function waitForFile(filePath: string): Promise<string> {
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    const contents = await readFile(filePath, "utf8").catch(() => undefined)
+    if (contents !== undefined) return contents
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`Timed out waiting for ${filePath}`)
+}
+
+async function expectProcessGone(pid: number): Promise<void> {
+  await expect.poll(
+    () => {
+      try {
+        process.kill(pid, 0)
+        return false
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ESRCH"
+      }
+    },
+    { interval: 10, timeout: 2_000 }
+  ).toBe(true)
+}
+
+function terminatePid(pid: number): void {
+  try {
+    process.kill(pid, "SIGKILL")
+  } catch {
+    // Already gone.
+  }
+}

@@ -47,7 +47,7 @@ export async function requestExternalDirectory(
   await ctx.ask({
     permission: "external_directory",
     patterns: [normalized],
-    always: [normalized],
+    always: [],
     metadata: {
       executor: "ssh",
       remoteWorkspace: normalizeRemotePath("/", remoteRoot),

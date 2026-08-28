@@ -9,9 +9,15 @@ import { PathMapper } from "../../src/path-mapper.js"
 import { RemotePathResolver } from "../../src/remote-path-resolver.js"
 import { createLaunchPaths, createRuntimePaths } from "../../src/runtime-paths.js"
 import { quoteShell } from "../../src/shell-quote.js"
+import {
+  IDENTITY_COMMAND,
+  SessionSafety,
+  guardProjectTool,
+} from "../../src/session-safety.js"
 import { createSSHPool } from "../../src/ssh-pool.js"
 import { SshClient } from "../../src/ssh/client.js"
 import { ControlMaster } from "../../src/ssh/control-master.js"
+import { applySubagentPolicy } from "../../src/subagent-policy.js"
 import { RemoteFileConflict, SyncEngine } from "../../src/sync-engine.js"
 import { createBashTool } from "../../src/tools/bash.js"
 import { createEditTool } from "../../src/tools/edit.js"
@@ -78,6 +84,7 @@ describe("opt-in real SSH fit", () => {
         const manifest = new ManifestManager(mapper)
         const sync = new SyncEngine(config, mapper, manifest, pool)
         const resolver = new RemotePathResolver(canonicalWorkdir, pool)
+        const sessionSafety = new SessionSafety(canonicalWorkdir)
         const permissions: Array<Parameters<ToolContext["ask"]>[0]> = []
         const ctx = context(async (request) => {
           permissions.push(request)
@@ -94,20 +101,51 @@ describe("opt-in real SSH fit", () => {
         automatedDir = candidateAutomatedDir
         const testDir = candidateAutomatedDir
 
-        const bash = createBashTool(pool, canonicalWorkdir, resolver)
-        const read = createReadTool(mapper, sync, pool, resolver)
-        const write = createWriteTool(mapper, sync, resolver)
-        const edit = createEditTool(mapper, sync, resolver)
-        const glob = createGlobTool(config, pool, resolver)
-        const grep = createGrepTool(config, pool, resolver)
-        const patch = createPatchTool(config, mapper, sync, resolver)
-        const status = createStatusTool(config, pool)
+        const bash = createBashTool(
+          pool,
+          canonicalWorkdir,
+          resolver,
+          sessionSafety
+        )
+        const read = guardProjectTool(
+          createReadTool(mapper, sync, pool, resolver),
+          sessionSafety
+        )
+        const write = guardProjectTool(
+          createWriteTool(mapper, sync, resolver),
+          sessionSafety
+        )
+        const edit = guardProjectTool(
+          createEditTool(mapper, sync, resolver),
+          sessionSafety
+        )
+        const glob = guardProjectTool(
+          createGlobTool(config, pool, resolver),
+          sessionSafety
+        )
+        const grep = guardProjectTool(
+          createGrepTool(config, pool, resolver),
+          sessionSafety
+        )
+        const patch = guardProjectTool(
+          createPatchTool(config, mapper, sync, resolver),
+          sessionSafety
+        )
+        const statusPolicy = applySubagentPolicy({ subagent_depth: 1 })
+        const status = createStatusTool(
+          config,
+          pool,
+          () => statusPolicy,
+          (sessionID) => sessionSafety.beginStatusCheck(sessionID),
+          (sessionID, attempt, result) =>
+            sessionSafety.recordStatusResult(sessionID, attempt, result)
+        )
 
         expect(output(await status.execute({}, ctx))).toContain('"controlMaster": "healthy"')
         expect(
           output(
             await bash.execute(
-              { command: "pwd -P; whoami; uname -s", description: "real fit identity" },
+              { command: IDENTITY_COMMAND, description: "real fit identity" },
               ctx
             )
           )
@@ -181,7 +219,9 @@ describe("opt-in real SSH fit", () => {
         const rootPermissions: Array<Parameters<ToolContext["ask"]>[0]> = []
         await new RemotePathResolver("/", pool).resolveExisting(
           "/etc/os-release",
-          context(async (request) => rootPermissions.push(request))
+          context(async (request) => {
+            rootPermissions.push(request)
+          })
         )
         expect(rootPermissions).toEqual([])
 

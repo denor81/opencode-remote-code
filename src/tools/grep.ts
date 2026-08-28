@@ -51,7 +51,7 @@ export function createGrepTool(
       await ctx.ask({
         permission: "grep",
         patterns: [permissionPattern],
-        always: [permissionPattern],
+        always: [],
         metadata: { executor: "ssh", remotePath: searchDir },
       })
       const limit = 100

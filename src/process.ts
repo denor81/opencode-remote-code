@@ -7,6 +7,7 @@ export const DEFAULT_KILL_GRACE_MS = 3_000
 export type ProcessOutputMode = "capture" | "inherit" | "ignore"
 export type ProcessInputMode = "pipe" | "inherit" | "ignore"
 export type ProcessTermination = "abort" | "requested" | "timeout" | null
+export type ProcessTerminationMode = "process" | "process-group"
 
 export interface ProcessStdioOptions {
   stdin?: ProcessInputMode
@@ -23,6 +24,8 @@ export interface ProcessOptions {
   signal?: AbortSignal
   timeoutMs?: number
   killGraceMs?: number
+  /** Use a new POSIX process group and terminate the complete owned group. */
+  terminationMode?: ProcessTerminationMode
   maxStdoutBytes?: number
   maxStderrBytes?: number
   onStdout?: (chunk: Buffer) => void
@@ -81,6 +84,27 @@ export class ProcessAbortError extends ProcessError {
   }
 }
 
+export class ProcessTerminationError extends ProcessError {
+  readonly failures: unknown[]
+
+  constructor(command: string, args: readonly string[], failures: readonly unknown[]) {
+    super(
+      `Failed to terminate owned process group: ${formatCommand(command, args)}`,
+      command,
+      args,
+      undefined,
+      {
+        cause:
+          failures.length === 1
+            ? failures[0]
+            : new AggregateError(failures, "Process-group termination failed"),
+      }
+    )
+    this.name = "ProcessTerminationError"
+    this.failures = [...failures]
+  }
+}
+
 interface BoundedCapture {
   readonly text: () => string
   readonly truncated: () => boolean
@@ -88,7 +112,8 @@ interface BoundedCapture {
 
 /**
  * Spawn a process without a shell and return a handle that can be terminated.
- * Non-zero exits are represented in `result`; only spawn failures reject it.
+ * Non-zero exits are represented in `result`; spawn and owned-group cleanup
+ * failures reject it.
  */
 export function spawnManaged(
   command: string,
@@ -112,6 +137,9 @@ export function spawnManaged(
     options.maxStderrBytes,
     DEFAULT_MAX_OUTPUT_BYTES
   )
+  const terminationMode = processTerminationMode(options.terminationMode)
+  const useProcessGroup =
+    terminationMode === "process-group" && process.platform !== "win32"
 
   const stdinMode = options.stdio?.stdin ?? (options.input === undefined ? "ignore" : "pipe")
   const stdoutMode = options.stdio?.stdout ?? "capture"
@@ -125,6 +153,7 @@ export function spawnManaged(
     child = spawn(command, processArgs, {
       cwd: options.cwd,
       env: options.env,
+      detached: useProcessGroup,
       shell: false,
       stdio: [stdinMode, outputMode(stdoutMode), outputMode(stderrMode)],
     })
@@ -149,10 +178,29 @@ export function spawnManaged(
   let resolveResult!: (value: ProcessResult) => void
   let rejectResult!: (reason: ProcessError) => void
 
-  const result = new Promise<ProcessResult>((resolve, reject) => {
+  const childResult = new Promise<ProcessResult>((resolve, reject) => {
     resolveResult = resolve
     rejectResult = reject
   })
+  let groupTermination: Promise<void> | undefined
+  let rejectGroupFailure!: (reason: unknown) => void
+  const groupFailure = new Promise<never>((_resolve, reject) => {
+    rejectGroupFailure = reject
+  })
+
+  const ensureGroupTermination = (): Promise<void> => {
+    if (!useProcessGroup || child.pid === undefined) return Promise.resolve()
+    if (!groupTermination) {
+      groupTermination = terminateProcessGroup(
+        child.pid,
+        command,
+        processArgs,
+        killGraceMs
+      )
+      void groupTermination.catch(rejectGroupFailure)
+    }
+    return groupTermination
+  }
 
   const cleanup = (): void => {
     if (timeout) clearTimeout(timeout)
@@ -161,10 +209,15 @@ export function spawnManaged(
   }
 
   const requestTermination = (reason: Exclude<ProcessTermination, null>): void => {
-    if (settled) return
+    if (settled && !useProcessGroup) return
     if (termination === null) termination = reason
     if (termSent) return
     termSent = true
+
+    if (useProcessGroup) {
+      void ensureGroupTermination()
+      return
+    }
 
     try {
       child.kill("SIGTERM")
@@ -236,6 +289,16 @@ export function spawnManaged(
 
   options.signal?.addEventListener("abort", abortHandler, { once: true })
   if (options.signal?.aborted) abortHandler()
+
+  const result = useProcessGroup
+    ? Promise.race([
+        childResult.then(async (value) => {
+          await ensureGroupTermination()
+          return value
+        }),
+        groupFailure,
+      ])
+    : childResult
 
   return {
     get pid() {
@@ -330,6 +393,83 @@ function byteLimitOption(name: string, value: number | undefined, fallback: numb
     throw new RangeError(`${name} must be a non-negative safe integer`)
   }
   return resolved
+}
+
+function processTerminationMode(
+  value: ProcessTerminationMode | undefined
+): ProcessTerminationMode {
+  if (value === undefined || value === "process") return "process"
+  if (value === "process-group") return value
+  throw new TypeError("terminationMode must be 'process' or 'process-group'")
+}
+
+async function terminateProcessGroup(
+  pid: number,
+  command: string,
+  args: readonly string[],
+  graceMs: number
+): Promise<void> {
+  const failures: unknown[] = []
+  if (!signalProcessGroup(pid, "SIGTERM", failures)) return
+
+  if (!(await waitForProcessGroupExit(pid, graceMs))) {
+    if (signalProcessGroup(pid, "SIGKILL", failures)) {
+      if (!(await waitForProcessGroupExit(pid, graceMs))) {
+        failures.push(
+          new Error(`Process group ${pid} did not exit after SIGKILL`)
+        )
+      }
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new ProcessTerminationError(command, args, failures)
+  }
+}
+
+function signalProcessGroup(
+  pid: number,
+  signal: NodeJS.Signals,
+  failures: unknown[]
+): boolean {
+  try {
+    process.kill(-pid, signal)
+    return true
+  } catch (error) {
+    if (errnoIs(error, "ESRCH")) return false
+    failures.push(
+      new Error(`Failed to send ${signal} to process group ${pid}`, { cause: error })
+    )
+    return true
+  }
+}
+
+async function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    if (!processGroupExists(pid)) return true
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return false
+    await new Promise((resolve) => setTimeout(resolve, Math.min(10, remaining)))
+  }
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0)
+    return true
+  } catch (error) {
+    return !errnoIs(error, "ESRCH")
+  }
+}
+
+function errnoIs(error: unknown, code: string): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === code
+  )
 }
 
 function describeResult(result: ProcessResult): string {

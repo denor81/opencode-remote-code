@@ -45,7 +45,7 @@ describe("external directory permission", () => {
     expect(ask).toHaveBeenCalledWith({
       permission: "external_directory",
       patterns: ["/srv/shared/file.txt"],
-      always: ["/srv/shared/file.txt"],
+      always: [],
       metadata: {
         executor: "ssh",
         remoteWorkspace: "/srv/app",

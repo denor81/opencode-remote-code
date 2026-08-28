@@ -12,12 +12,9 @@ import {
 
 const argv = process.argv.slice(2)
 if (argv.length === 1 && argv[0] === "--version") {
-  const packageJson = JSON.parse(
-    readFileSync(new URL("../../../package.json", import.meta.url), "utf8")
-  )
   const output =
     process.env.FAKE_OPENCODE_VERSION_STDOUT ??
-    `${packageJson.dependencies["@opencode-ai/plugin"]}\n`
+    `${packageOpenCodeVersion()}\n`
   const errorOutput = process.env.FAKE_OPENCODE_VERSION_STDERR ?? ""
   const pidFile = process.env.FAKE_OPENCODE_PID_FILE
   if (pidFile) writeFileSync(pidFile, `${process.pid}\n`)
@@ -57,10 +54,26 @@ if (argv.length === 2 && argv[0] === "debug" && argv[1] === "config") {
     (entry) => Array.isArray(entry) && entry[1]?.compatibilityProbe === token
   )
   if (!tuple) throw new Error("Fake OpenCode requires the compatibility probe tuple")
+  const record = {
+    protocol: "opencode-ssh-loader-probe-v3",
+    token,
+    loaderRuntimeVersion:
+      process.env.npm_config_opencode_ssh_probe_runtime_version ??
+      packageOpenCodeVersion(),
+    loaderRuntimeVersionSource: "runtime-executable",
+    callableSessionLookupObservedInLoaderProcess:
+      process.env.npm_config_opencode_ssh_probe_without_session_get !== "1",
+  }
+  if (process.env.npm_config_opencode_ssh_probe_without_runtime_version === "1") {
+    delete record.loaderRuntimeVersion
+  }
+  if (process.env.npm_config_opencode_ssh_probe_extra_field === "1") {
+    record.unexpected = true
+  }
   const temporaryPath = `${resultPath}.${process.pid}.${randomUUID()}.tmp`
   writeFileSync(
     temporaryPath,
-    `${JSON.stringify({ protocol: "opencode-ssh-loader-probe-v1", token })}\n`,
+    `${JSON.stringify(record)}\n`,
     { encoding: "utf8", flag: "wx", mode: 0o600 }
   )
   renameSync(temporaryPath, resultPath)
@@ -78,6 +91,9 @@ const selectedEnvironmentNames = [
   "OPENCODE_SSH_MIRROR_ROOT",
   "OPENCODE_SSH_SSH_BIN",
   "OPENCODE_SSH_SFTP_BIN",
+  "OPENCODE_SSH_EXPECTED_OPENCODE_RUNTIME_VERSION",
+  "OPENCODE_SSH_TASK_RESUME_CAPABILITY",
+  "OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS",
 ]
 
 const readyNonce = process.env.OPENCODE_SSH_READY_NONCE
@@ -94,6 +110,8 @@ const invocation = {
 
 const logPath = process.env.FAKE_OPENCODE_LOG
 if (logPath) appendFileSync(logPath, `${JSON.stringify(invocation)}\n`)
+const startMarker = process.env.FAKE_OPENCODE_START_MARKER
+if (startMarker) writeFileSync(startMarker, `${process.pid}\n`)
 
 if (process.env.FAKE_OPENCODE_WRITE_READY === "1") {
   const readyPath = requiredEnvironment("OPENCODE_SSH_READY_PATH")
@@ -113,6 +131,16 @@ if (process.env.FAKE_OPENCODE_WRITE_READY === "1") {
   })
   chmodSync(temporaryPath, 0o600)
   renameSync(temporaryPath, readyPath)
+  const readyMarker = process.env.FAKE_OPENCODE_READY_MARKER
+  if (readyMarker) writeFileSync(readyMarker, `${process.pid}\n`)
+}
+
+const activeMarker = process.env.FAKE_OPENCODE_ACTIVE_MARKER
+if (activeMarker) {
+  setTimeout(
+    () => writeFileSync(activeMarker, `${process.pid}\n`),
+    configuredNumber("FAKE_OPENCODE_ACTIVE_MARKER_DELAY_MS", 100)
+  )
 }
 
 const delayMs = configuredNumber("FAKE_OPENCODE_DELAY_MS", 0)
@@ -137,4 +165,11 @@ function configuredNumber(name, fallback) {
     throw new Error(`Fake OpenCode requires a non-negative integer for ${name}`)
   }
   return parsed
+}
+
+function packageOpenCodeVersion() {
+  const packageJson = JSON.parse(
+    readFileSync(new URL("../../../package.json", import.meta.url), "utf8")
+  )
+  return packageJson.dependencies["@opencode-ai/plugin"]
 }

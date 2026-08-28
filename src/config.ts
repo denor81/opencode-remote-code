@@ -1,5 +1,10 @@
 import path from "node:path"
+import { isOpenCodeVersion } from "./opencode-runtime-version.js"
 import { computeTargetID } from "./runtime-paths.js"
+import {
+  TASK_RESUME_PROTOCOL,
+  TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+} from "./task-resume-capability.js"
 
 export const REMOTE_ENV = {
   alias: "OPENCODE_SSH_ALIAS",
@@ -13,6 +18,9 @@ export const REMOTE_ENV = {
   mirrorRoot: "OPENCODE_SSH_MIRROR_ROOT",
   sshBinary: "OPENCODE_SSH_SSH_BIN",
   sftpBinary: "OPENCODE_SSH_SFTP_BIN",
+  expectedOpenCodeRuntimeVersion:
+    "OPENCODE_SSH_EXPECTED_OPENCODE_RUNTIME_VERSION",
+  taskResumeCapability: "OPENCODE_SSH_TASK_RESUME_CAPABILITY",
 } as const
 
 export interface RemoteConfig {
@@ -27,7 +35,14 @@ export interface RemoteConfig {
   mirrorRoot: string
   sshBinary: string
   sftpBinary: string
+  expectedOpenCodeRuntimeVersion?: string
+  taskResumeEnabled?: boolean
   active: true
+}
+
+export interface LoadedRemoteConfig extends RemoteConfig {
+  expectedOpenCodeRuntimeVersion: string
+  taskResumeEnabled: boolean
 }
 
 const REQUIRED_FIELDS = [
@@ -40,6 +55,7 @@ const REQUIRED_FIELDS = [
   REMOTE_ENV.readyNonce,
   REMOTE_ENV.runtimeDir,
   REMOTE_ENV.mirrorRoot,
+  REMOTE_ENV.expectedOpenCodeRuntimeVersion,
 ] as const
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/
@@ -48,7 +64,7 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/
 export function loadConfig(
   options?: Record<string, unknown>,
   env: NodeJS.ProcessEnv = process.env
-): RemoteConfig | null {
+): LoadedRemoteConfig | null {
   const launchID = env[REMOTE_ENV.launchID]
   const optionLaunchID = options?.launchID
 
@@ -68,6 +84,26 @@ export function loadConfig(
   const readyNonce = env[REMOTE_ENV.readyNonce]!
   const runtimeDir = env[REMOTE_ENV.runtimeDir]!
   const mirrorRoot = env[REMOTE_ENV.mirrorRoot]!
+  const expectedOpenCodeRuntimeVersion =
+    env[REMOTE_ENV.expectedOpenCodeRuntimeVersion]!
+
+  if (!isOpenCodeVersion(expectedOpenCodeRuntimeVersion)) {
+    throw new Error(
+      "OpenCode SSH launcher supplied an invalid expected OpenCode runtime version"
+    )
+  }
+  if (
+    options?.expectedOpenCodeRuntimeVersion !== expectedOpenCodeRuntimeVersion
+  ) {
+    throw new Error(
+      "OpenCode SSH plugin expected runtime version option does not match the launcher environment"
+    )
+  }
+  const taskResumeEnabled =
+    expectedOpenCodeRuntimeVersion ===
+      TASK_RESUME_QUALIFIED_OPENCODE_VERSION &&
+    options?.taskResumeCapability === TASK_RESUME_PROTOCOL &&
+    env[REMOTE_ENV.taskResumeCapability] === TASK_RESUME_PROTOCOL
 
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(alias) || CONTROL_CHARACTERS.test(alias)) {
     throw new Error("OpenCode SSH launcher supplied an invalid SSH alias")
@@ -116,6 +152,8 @@ export function loadConfig(
     mirrorRoot,
     sshBinary: env[REMOTE_ENV.sshBinary] || "ssh",
     sftpBinary: env[REMOTE_ENV.sftpBinary] || "sftp",
+    expectedOpenCodeRuntimeVersion,
+    taskResumeEnabled,
     active: true,
   }
 }

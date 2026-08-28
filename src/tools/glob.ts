@@ -24,7 +24,7 @@ export function createGlobTool(
       await ctx.ask({
         permission: "glob",
         patterns: [permissionPattern],
-        always: [permissionPattern],
+        always: [],
         metadata: { executor: "ssh", remotePath: searchDir },
       })
       const limit = 100

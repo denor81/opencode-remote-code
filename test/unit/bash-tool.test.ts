@@ -3,13 +3,18 @@ import { Effect } from "effect"
 import { describe, expect, it, vi } from "vitest"
 import type { ProcessResult } from "../../src/process.js"
 import type { RemotePathResolver } from "../../src/remote-path-resolver.js"
+import {
+  IDENTITY_COMMAND,
+  SessionSafety,
+  type ProjectAdmissionToken,
+} from "../../src/session-safety.js"
 import type { SSHPool } from "../../src/ssh-pool.js"
 import {
   SshClientError,
   type ExecOptions,
   type RemoteCommandResult,
 } from "../../src/ssh/client.js"
-import { createBashTool } from "../../src/tools/bash.js"
+import { createBashTool, type BashSafety } from "../../src/tools/bash.js"
 
 describe("remote bash tool", () => {
   it("publishes split UTF-8 output before completion and preserves model output", async () => {
@@ -26,7 +31,12 @@ describe("remote bash tool", () => {
       },
     } as SSHPool
     let settled = false
-    const execution = createBashTool(pool, "/srv/project", resolver()).execute(
+    const execution = createBashTool(
+      pool,
+      "/srv/project",
+      resolver(),
+      unrestrictedSafety()
+    ).execute(
       { command: "run", description: "Streaming command" },
       context(updates)
     )
@@ -42,7 +52,7 @@ describe("remote bash tool", () => {
     gate.resolve()
     const response = await execution
     expect(metadata(response).output).toBe("Awarning€B")
-    expect(response.output).toBe("A€B\n\nstderr:\nwarning")
+    expect(toolOutput(response)).toBe("A€B\n\nstderr:\nwarning")
   })
 
   it("coalesces rapid output without overlapping metadata publications", async () => {
@@ -76,7 +86,12 @@ describe("remote bash tool", () => {
       },
     } as SSHPool
 
-    const execution = createBashTool(pool, "/srv/project", resolver()).execute(
+    const execution = createBashTool(
+      pool,
+      "/srv/project",
+      resolver(),
+      unrestrictedSafety()
+    ).execute(
       { command: "burst", description: "Burst command" },
       ctx
     )
@@ -120,7 +135,7 @@ describe("remote bash tool", () => {
 
     const response = await execute(pool, ctx)
 
-    expect(metadata(updates.at(-1)!)).toEqual(response.metadata)
+    expect(metadata(updates.at(-1)!)).toEqual(metadata(response))
     expect(metadata(updates.at(-1)!)).toEqual({
       output: "live",
       exit: 0,
@@ -149,7 +164,7 @@ describe("remote bash tool", () => {
       remoteOutputTruncated: true,
       exit: 0,
     })
-    expect(response.output).toBe(output)
+    expect(toolOutput(response)).toBe(output)
     expect(metadata(updates.at(-1)!).truncated).toBe(true)
     expect(metadata(updates.at(-1)!).remoteOutputTruncated).toBe(true)
   })
@@ -162,7 +177,10 @@ describe("remote bash tool", () => {
     })
 
     const response = await execute(pool, context([]))
-    const hostMetadata = { ...response.metadata, truncated: false }
+    const hostMetadata: Record<string, unknown> = {
+      ...metadata(response),
+      truncated: false,
+    }
 
     expect(hostMetadata.remoteOutputTruncated).toBe(true)
   })
@@ -229,7 +247,7 @@ describe("remote bash tool", () => {
 
     const response = await execute(pool, ctx)
 
-    expect(response.output).toBe("firstlast")
+    expect(toolOutput(response)).toBe("firstlast")
     expect(metadata(response).output).toBe("firstlast")
     expect(attempts).toHaveLength(2)
   })
@@ -368,6 +386,320 @@ describe("remote bash tool", () => {
     expect(updates).toHaveLength(settledUpdateCount)
     expect(metadata(updates.at(-1)!).output).toBe("complete")
   })
+
+  it("runs the session safety check before path resolution, permission, or SSH", async () => {
+    const rejection = new Error("preflight required")
+    const beforeBash = vi.fn(() => {
+      throw rejection
+    })
+    const resolveExisting = vi.fn(async () => "/srv/project")
+    const ask = vi.fn(async () => undefined)
+    const exec = vi.fn(async () => result())
+    const ctx = context([])
+    ctx.ask = ask
+
+    await expect(
+      createBashTool(
+        { exec } as unknown as SSHPool,
+        "/srv/project",
+        { resolveExisting } as unknown as RemotePathResolver,
+        {
+          beforeBash,
+          completeIdentity: vi.fn(),
+          revalidateProject: vi.fn(),
+          projectSignal: vi.fn(() => new AbortController().signal),
+          releaseProject: vi.fn(),
+        }
+      ).execute({ command: "pwd", description: "pwd" }, ctx)
+    ).rejects.toBe(rejection)
+
+    expect(resolveExisting).not.toHaveBeenCalled()
+    expect(ask).not.toHaveBeenCalled()
+    expect(exec).not.toHaveBeenCalled()
+    expect(beforeBash).toHaveBeenCalledWith(ctx, "pwd", undefined)
+  })
+
+  it("rejects an explicit identity workdir before path, permission, or SSH work", async () => {
+    const safety = new SessionSafety("/srv/project")
+    const statusAttempt = safety.beginStatusCheck("session")
+    safety.recordStatusResult("session", statusAttempt, result())
+    const resolveExisting = vi.fn(async () => "/srv/project")
+    const ask = vi.fn(async () => undefined)
+    const exec = vi.fn(async () => result())
+    const ctx = context([])
+    ctx.ask = ask
+
+    await expect(
+      createBashTool(
+        { exec } as unknown as SSHPool,
+        "/srv/project",
+        { resolveExisting } as unknown as RemotePathResolver,
+        safety
+      ).execute(
+        {
+          command: IDENTITY_COMMAND,
+          description: "Identity with explicit root",
+          workdir: "/srv/project",
+        },
+        ctx
+      )
+    ).rejects.toThrow(/identity preflight.*explicit workdir/i)
+
+    expect(resolveExisting).not.toHaveBeenCalled()
+    expect(ask).not.toHaveBeenCalled()
+    expect(exec).not.toHaveBeenCalled()
+    expect(() =>
+      safety.beforeBash(
+        { sessionID: "session", agent: "build" },
+        IDENTITY_COMMAND
+      )
+    ).toThrow(/remote_status/i)
+  })
+
+  it("retains explicit custom workdir behavior after preflight", async () => {
+    const safety = new SessionSafety("/srv/project")
+    const statusAttempt = safety.beginStatusCheck("session")
+    safety.recordStatusResult("session", statusAttempt, result())
+    const admission = safety.beforeBash(
+      { sessionID: "session", agent: "build" },
+      IDENTITY_COMMAND
+    )
+    expect(admission.kind).toBe("identity")
+    if (admission.kind !== "identity") throw new Error("Expected identity admission")
+    safety.completeIdentity(
+      "session",
+      admission.attempt,
+      result({ stdout: "remote-host\nremote-user\n/srv/project\n" })
+    )
+    const resolveExisting = vi.fn(
+      async (_path: string, _context: ToolContext) => "/srv/custom"
+    )
+    const ask = vi.fn(async () => undefined)
+    const exec = vi.fn(async () => result({ stdout: "/srv/custom\n" }))
+    const ctx = context([])
+    ctx.ask = ask
+
+    await createBashTool(
+      { exec } as unknown as SSHPool,
+      "/srv/project",
+      { resolveExisting } as unknown as RemotePathResolver,
+      safety
+    ).execute(
+      {
+        command: "pwd -P",
+        description: "Custom workdir",
+        workdir: "/srv/custom",
+      },
+      ctx
+    )
+
+    expect(resolveExisting).toHaveBeenCalledWith(
+      "/srv/custom",
+      expect.objectContaining({
+        sessionID: ctx.sessionID,
+        metadata: ctx.metadata,
+      })
+    )
+    const resolverContext = resolveExisting.mock.calls[0]?.[1]
+    expect(resolverContext).not.toBe(ctx)
+    expect(resolverContext?.abort).not.toBe(ctx.abort)
+    expect(resolverContext?.abort.aborted).toBe(false)
+    expect(ask).toHaveBeenCalledOnce()
+    expect(exec).toHaveBeenCalledOnce()
+  })
+
+  it("does not start project SSH when delayed approval crosses a newer status epoch", async () => {
+    const safety = new SessionSafety("/srv/project")
+    const statusAttempt = safety.beginStatusCheck("session")
+    safety.recordStatusResult("session", statusAttempt, result())
+    const identityAdmission = safety.beforeBash(
+      { sessionID: "session", agent: "build" },
+      IDENTITY_COMMAND
+    )
+    if (identityAdmission.kind !== "identity") {
+      throw new Error("Expected identity admission")
+    }
+    safety.completeIdentity(
+      "session",
+      identityAdmission.attempt,
+      result({ stdout: "remote-host\nremote-user\n/srv/project\n" })
+    )
+    const askStarted = deferred()
+    const releaseAsk = deferred()
+    const exec = vi.fn(async () => result())
+    const ctx = context([])
+    ctx.ask = vi.fn(async () => {
+      askStarted.resolve()
+      await releaseAsk.promise
+    })
+    const execution = createBashTool(
+      { exec } as unknown as SSHPool,
+      "/srv/project",
+      resolver(),
+      safety
+    ).execute({ command: "pwd -P", description: "Project command" }, ctx)
+
+    await askStarted.promise
+    safety.beginStatusCheck("session")
+    releaseAsk.resolve()
+
+    await expect(execution).rejects.toThrow(/project admission.*stale/i)
+    expect(exec).not.toHaveBeenCalled()
+  })
+
+  it("aborts the project lease when revocation occurs during metadata publication", async () => {
+    const safety = new SessionSafety("/srv/project")
+    completeSessionPreflight(safety)
+    const metadataStarted = deferred()
+    const releaseMetadata = deferred()
+    const exec = vi.fn(async () => result())
+    let operationSignal: AbortSignal | undefined
+    const resolveExisting = vi.fn(
+      async (_path: string, resolverContext: ToolContext) => {
+        operationSignal = resolverContext.abort
+        return "/srv/project"
+      }
+    )
+    const ctx = context([])
+    ctx.metadata = vi.fn(() =>
+      Effect.promise(async () => {
+        metadataStarted.resolve()
+        await releaseMetadata.promise
+      })
+    )
+    const execution = createBashTool(
+      { exec } as unknown as SSHPool,
+      "/srv/project",
+      { resolveExisting } as unknown as RemotePathResolver,
+      safety
+    ).execute({ command: "pwd -P", description: "Project command" }, ctx)
+
+    await metadataStarted.promise
+    safety.beginStatusCheck("session")
+    expect(operationSignal?.aborted).toBe(true)
+    expect(operationSignal?.reason).toMatchObject({ name: "AbortError" })
+    releaseMetadata.resolve()
+
+    await expect(execution).rejects.toThrow(/project admission.*stale/i)
+    expect(exec).not.toHaveBeenCalled()
+
+    completeSessionPreflight(safety)
+    const laterExec = vi.fn(async () => result({ stdout: "/srv/project\n" }))
+    await createBashTool(
+      { exec: laterExec } as unknown as SSHPool,
+      "/srv/project",
+      resolver(),
+      safety
+    ).execute(
+      { command: "pwd -P", description: "Later project command" },
+      context([])
+    )
+    expect(laterExec).toHaveBeenCalledOnce()
+  })
+
+  it("requires fresh status when identity permission is denied after admission", async () => {
+    const safety = new SessionSafety("/srv/project")
+    const statusAttempt = safety.beginStatusCheck("session")
+    safety.recordStatusResult("session", statusAttempt, result())
+    const rejection = new Error("identity Bash denied")
+    const ctx = context([])
+    ctx.ask = vi.fn(async () => {
+      throw rejection
+    })
+
+    await expect(
+      createBashTool(
+        { exec: vi.fn(async () => result()) } as unknown as SSHPool,
+        "/srv/project",
+        resolver(),
+        safety
+      ).execute(
+        { command: IDENTITY_COMMAND, description: "Identity" },
+        ctx
+      )
+    ).rejects.toBe(rejection)
+
+    expect(() =>
+      safety.beforeBash(
+        { sessionID: "session", agent: "build" },
+        IDENTITY_COMMAND
+      )
+    ).toThrow(/remote_status/i)
+  })
+
+  it("rejects a delayed identity completion after clearSession", async () => {
+    const safety = new SessionSafety("/srv/project")
+    const statusAttempt = safety.beginStatusCheck("session")
+    safety.recordStatusResult("session", statusAttempt, result())
+    const started = deferred()
+    const release = deferred()
+    const execution = createBashTool(
+      poolFor(async () => {
+        started.resolve()
+        await release.promise
+        return result({ stdout: "remote-host\nremote-user\n/srv/project\n" })
+      }),
+      "/srv/project",
+      resolver(),
+      safety
+    ).execute(
+      { command: IDENTITY_COMMAND, description: "Identity" },
+      context([])
+    )
+
+    await started.promise
+    safety.clearSession("session")
+    release.resolve()
+
+    await expect(execution).rejects.toThrow(/stale|superseded/i)
+    expect(() => safety.requirePreflight("session")).toThrow(/preflight/i)
+  })
+
+  it("does not commit identity when abort occurs during metadata settlement", async () => {
+    const safety = new SessionSafety("/srv/project")
+    const statusAttempt = safety.beginStatusCheck("session")
+    safety.recordStatusResult("session", statusAttempt, result())
+    const controller = new AbortController()
+    const settlementStarted = deferred()
+    const releaseSettlement = deferred()
+    let publication = 0
+    const ctx = context([])
+    ctx.abort = controller.signal
+    ctx.metadata = vi.fn(() => {
+      publication++
+      if (publication === 2) {
+        return Effect.promise(async () => {
+          settlementStarted.resolve()
+          await releaseSettlement.promise
+        })
+      }
+      return Effect.void
+    })
+    const execution = createBashTool(
+      poolFor(async () =>
+        result({ stdout: "remote-host\nremote-user\n/srv/project\n" })
+      ),
+      "/srv/project",
+      resolver(),
+      safety
+    ).execute(
+      { command: IDENTITY_COMMAND, description: "Identity" },
+      ctx
+    )
+
+    await settlementStarted.promise
+    controller.abort()
+    releaseSettlement.resolve()
+
+    await expect(execution).rejects.toMatchObject({ name: "AbortError" })
+    expect(() => safety.requirePreflight("session")).toThrow(/preflight/i)
+    expect(() =>
+      safety.beforeBash(
+        { sessionID: "session", agent: "build" },
+        IDENTITY_COMMAND
+      )
+    ).toThrow(/remote_status/i)
+  })
 })
 
 type MetadataUpdate = Parameters<ToolContext["metadata"]>[0]
@@ -415,7 +747,42 @@ function execute(
     description: "Streaming command",
   }
 ) {
-  return createBashTool(pool, "/srv/project", resolver()).execute(args, ctx)
+  return createBashTool(
+    pool,
+    "/srv/project",
+    resolver(),
+    unrestrictedSafety()
+  ).execute(args, ctx)
+}
+
+function unrestrictedSafety(): BashSafety {
+  return {
+    beforeBash: () => ({
+      kind: "project",
+      admission: {} as ProjectAdmissionToken,
+    }),
+    completeIdentity: () => {},
+    revalidateProject: () => {},
+    projectSignal: () => new AbortController().signal,
+    releaseProject: () => {},
+  }
+}
+
+function completeSessionPreflight(safety: SessionSafety): void {
+  const statusAttempt = safety.beginStatusCheck("session")
+  safety.recordStatusResult("session", statusAttempt, result())
+  const admission = safety.beforeBash(
+    { sessionID: "session", agent: "build" },
+    IDENTITY_COMMAND
+  )
+  if (admission.kind !== "identity") {
+    throw new Error("Expected identity admission")
+  }
+  safety.completeIdentity(
+    "session",
+    admission.attempt,
+    result({ stdout: "remote-host\nremote-user\n/srv/project\n" })
+  )
 }
 
 function result(overrides: Partial<RemoteCommandResult> = {}): RemoteCommandResult {
@@ -448,8 +815,30 @@ function processResult(overrides: Partial<ProcessResult> = {}): ProcessResult {
   }
 }
 
-function metadata(value: { metadata?: unknown }): Record<string, unknown> {
+function metadata(value: unknown): Record<string, unknown> {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    !("metadata" in value) ||
+    value.metadata === null ||
+    typeof value.metadata !== "object" ||
+    Array.isArray(value.metadata)
+  ) {
+    throw new TypeError("Expected a structured tool result with object metadata")
+  }
   return value.metadata as Record<string, unknown>
+}
+
+function toolOutput(value: unknown): string {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    !("output" in value) ||
+    typeof value.output !== "string"
+  ) {
+    throw new TypeError("Expected a structured tool result with string output")
+  }
+  return value.output
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {

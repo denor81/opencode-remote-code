@@ -4,6 +4,10 @@ import {
   mergeOpenCodeConfigContent,
   parseCli,
 } from "../../src/launcher-config.js"
+import {
+  TASK_RESUME_PROTOCOL,
+  TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+} from "../../src/task-resume-capability.js"
 
 describe("parseCli", () => {
   it("accepts exactly an alias and an absolute POSIX workdir", () => {
@@ -59,6 +63,7 @@ describe("parseCli", () => {
 
 describe("mergeOpenCodeConfigContent", () => {
   const safetyInstructionsPath = "/opt/opencode/opencode-ssh-safety.md"
+  const expectedRuntimeVersion = TASK_RESUME_QUALIFIED_OPENCODE_VERSION
 
   it("creates additive config when existing content is absent", () => {
     const merged = JSON.parse(
@@ -66,13 +71,20 @@ describe("mergeOpenCodeConfigContent", () => {
         undefined,
         "file:///opt/opencode/plugin.js",
         "launch-1",
-        safetyInstructionsPath
+        safetyInstructionsPath,
+        expectedRuntimeVersion
       )
     ) as Record<string, unknown>
 
     expect(merged).toEqual({
       instructions: [safetyInstructionsPath],
-      plugin: [["file:///opt/opencode/plugin.js", { launchID: "launch-1" }]],
+      plugin: [[
+        "file:///opt/opencode/plugin.js",
+        {
+          launchID: "launch-1",
+          expectedOpenCodeRuntimeVersion: expectedRuntimeVersion,
+        },
+      ]],
     })
   })
 
@@ -83,13 +95,44 @@ describe("mergeOpenCodeConfigContent", () => {
           "  \n",
           "file:///opt/opencode/plugin.js",
           "launch-1",
-          safetyInstructionsPath
+          safetyInstructionsPath,
+          expectedRuntimeVersion
         )
       )
     ).toEqual({
       instructions: [safetyInstructionsPath],
-      plugin: [["file:///opt/opencode/plugin.js", { launchID: "launch-1" }]],
+      plugin: [[
+        "file:///opt/opencode/plugin.js",
+        {
+          launchID: "launch-1",
+          expectedOpenCodeRuntimeVersion: expectedRuntimeVersion,
+        },
+      ]],
     })
+  })
+
+  it("injects the private Task resume protocol only when qualified", () => {
+    const merged = JSON.parse(
+      mergeOpenCodeConfigContent(
+        undefined,
+        "file:///opt/opencode/plugin.js",
+        "launch-1",
+        safetyInstructionsPath,
+        expectedRuntimeVersion,
+        TASK_RESUME_PROTOCOL
+      )
+    ) as { plugin: unknown[] }
+
+    expect(merged.plugin).toEqual([
+      [
+        "file:///opt/opencode/plugin.js",
+        {
+          launchID: "launch-1",
+          expectedOpenCodeRuntimeVersion: expectedRuntimeVersion,
+          taskResumeCapability: TASK_RESUME_PROTOCOL,
+        },
+      ],
+    ])
   })
 
   it("parses JSONC and preserves all fields and existing plugins", () => {
@@ -105,7 +148,8 @@ describe("mergeOpenCodeConfigContent", () => {
         content,
         new URL("file:///opt/opencode/plugin.js"),
         "fixed-id",
-        safetyInstructionsPath
+        safetyInstructionsPath,
+        expectedRuntimeVersion
       )
     ) as {
       instructions: string[]
@@ -119,7 +163,13 @@ describe("mergeOpenCodeConfigContent", () => {
     expect(merged.instructions).toEqual(["CONTRIBUTING.md", safetyInstructionsPath])
     expect(merged.plugin).toEqual([
       "existing-plugin",
-      ["file:///opt/opencode/plugin.js", { launchID: "fixed-id" }],
+      [
+        "file:///opt/opencode/plugin.js",
+        {
+          launchID: "fixed-id",
+          expectedOpenCodeRuntimeVersion: expectedRuntimeVersion,
+        },
+      ],
     ])
   })
 
@@ -129,7 +179,8 @@ describe("mergeOpenCodeConfigContent", () => {
         JSON.stringify({ instructions: ["CONTRIBUTING.md", safetyInstructionsPath] }),
         "file:///opt/opencode/plugin.js",
         "launch-1",
-        safetyInstructionsPath
+        safetyInstructionsPath,
+        expectedRuntimeVersion
       )
     ) as { instructions: string[] }
 
@@ -161,7 +212,8 @@ describe("mergeOpenCodeConfigContent", () => {
         content,
         "file:///opt/opencode/plugin.js",
         "launch-1",
-        safetyInstructionsPath
+        safetyInstructionsPath,
+        expectedRuntimeVersion
       )
     ).toThrow(expected)
   })
@@ -172,7 +224,8 @@ describe("mergeOpenCodeConfigContent", () => {
         "{}",
         "https://example.test/plugin.js",
         "launch-1",
-        safetyInstructionsPath
+        safetyInstructionsPath,
+        expectedRuntimeVersion
       )
     ).toThrow(LauncherConfigError)
     expect(() =>
@@ -180,8 +233,24 @@ describe("mergeOpenCodeConfigContent", () => {
         "{}",
         "file:///plugin.js",
         "bad/id",
-        safetyInstructionsPath
+        safetyInstructionsPath,
+        expectedRuntimeVersion
       )
     ).toThrow(/Launch ID/)
   })
+
+  it.each(["", "v1.18.18", "01.18.18", "1.18"])(
+    "rejects invalid expected runtime version %j",
+    (version) => {
+      expect(() =>
+        mergeOpenCodeConfigContent(
+          undefined,
+          "file:///opt/opencode/plugin.js",
+          "launch-1",
+          safetyInstructionsPath,
+          version
+        )
+      ).toThrow(/Expected OpenCode runtime version/i)
+    }
+  )
 })

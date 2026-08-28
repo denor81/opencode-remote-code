@@ -79,7 +79,7 @@ export function createReadTool(
       await ctx.ask({
         permission: "read",
         patterns: [permissionPattern],
-        always: [permissionPattern],
+        always: [],
         metadata: { executor: "ssh", remotePath },
       })
 
@@ -224,7 +224,7 @@ export function createReadTool(
             truncated: more || cut,
           },
         }
-      })
+      }, ctx.abort)
     },
   })
 }

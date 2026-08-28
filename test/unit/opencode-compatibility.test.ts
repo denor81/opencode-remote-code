@@ -2,20 +2,25 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { runOpenCodeCompatibilityCheck } from "../../src/opencode-compatibility.js"
 import { readPackageMetadata } from "../../src/package-metadata.js"
+import { TASK_RESUME_QUALIFIED_OPENCODE_VERSION } from "../../src/task-resume-capability.js"
 
 const fakeOpenCode = fileURLToPath(new URL("../fixtures/bin/opencode", import.meta.url))
 const pluginURL = new URL("../../", import.meta.url)
 
 describe("OpenCode compatibility preflight", () => {
-  it("runs the loader probe and reports concise progress", async () => {
-    const { testedOpenCodeVersion } = await readPackageMetadata()
+  it("qualifies OpenCode 1.18.18 when loader lookup is callable", async () => {
     const progress: string[] = []
 
-    await runOpenCodeCompatibilityCheck({
+    const result = await runOpenCodeCompatibilityCheck({
       binary: fakeOpenCode,
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        FAKE_OPENCODE_VERSION_STDOUT: `${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}\n`,
+        npm_config_opencode_ssh_probe_runtime_version:
+          TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+      },
       signal: new AbortController().signal,
-      testedVersion: testedOpenCodeVersion,
+      testedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
       pluginURL,
       writeProgress: (message) => progress.push(message),
       writeWarning: () => undefined,
@@ -23,31 +28,140 @@ describe("OpenCode compatibility preflight", () => {
 
     expect(progress).toHaveLength(3)
     expect(progress[0]).toBe("checking OpenCode compatibility...")
-    expect(progress[1]).toBe(`testing OpenCode ${testedOpenCodeVersion} plugin loader...`)
+    expect(progress[1]).toBe(
+      `testing OpenCode ${TASK_RESUME_QUALIFIED_OPENCODE_VERSION} plugin loader...`
+    )
     expect(progress[2]).toMatch(/^compatibility passed \([\d.]+s\)$/u)
+    expect(result).toEqual({
+      detectedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+      loaderRuntimeVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+      loaderRuntimeVersionSource: "runtime-executable",
+      callableSessionLookupObservedInLoaderProcess: true,
+      taskResumeQualified: true,
+    })
   })
 
-  it("allows a different identified version only after a successful probe", async () => {
-    const { testedOpenCodeVersion } = await readPackageMetadata()
+  it("does not qualify another loader-tested version with callable lookup", async () => {
+    const loaderTestedVersion = "1.18.19"
     const warnings: string[] = []
 
-    await runOpenCodeCompatibilityCheck({
+    const result = await runOpenCodeCompatibilityCheck({
       binary: fakeOpenCode,
-      env: { ...process.env, FAKE_OPENCODE_VERSION_STDOUT: "1.18.19\n" },
+      env: {
+        ...process.env,
+        FAKE_OPENCODE_VERSION_STDOUT: `${loaderTestedVersion}\n`,
+        npm_config_opencode_ssh_probe_runtime_version: loaderTestedVersion,
+      },
       signal: new AbortController().signal,
-      testedVersion: testedOpenCodeVersion,
+      testedVersion: loaderTestedVersion,
       pluginURL,
       writeProgress: () => undefined,
       writeWarning: (message) => warnings.push(message),
     })
 
     expect(warnings).toEqual([
-      `OpenCode 1.18.19 passed the loader check but differs from the tested version ${testedOpenCodeVersion}; visual TUI checks remain required.`,
+      `OpenCode ${loaderTestedVersion} passed the loader check but is not the release-qualified Task resume version ${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}; Task resume is disabled.`,
     ])
+    expect(result).toEqual({
+      detectedVersion: loaderTestedVersion,
+      loaderRuntimeVersion: loaderTestedVersion,
+      loaderRuntimeVersionSource: "runtime-executable",
+      callableSessionLookupObservedInLoaderProcess: true,
+      taskResumeQualified: false,
+    })
+  })
+
+  it("rejects outer version dispatch that differs from the loader runtime", async () => {
+    await expect(
+      runOpenCodeCompatibilityCheck({
+        binary: fakeOpenCode,
+        env: {
+          ...process.env,
+          FAKE_OPENCODE_VERSION_STDOUT: "1.18.19\n",
+          npm_config_opencode_ssh_probe_runtime_version: "1.18.18",
+        },
+        signal: new AbortController().signal,
+        testedVersion: "1.18.19",
+        pluginURL,
+      })
+    ).rejects.toThrow(
+      /reported OpenCode version "1\.18\.19" did not match loader runtime version "1\.18\.18".*SSH connection was not started/u
+    )
+  })
+
+  it("rejects a loader without callable session lookup", async () => {
+    const progress: string[] = []
+    const warnings: string[] = []
+
+    await expect(
+      runOpenCodeCompatibilityCheck({
+        binary: fakeOpenCode,
+        env: {
+          ...process.env,
+          FAKE_OPENCODE_VERSION_STDOUT: `${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}\n`,
+          npm_config_opencode_ssh_probe_runtime_version:
+            TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+          npm_config_opencode_ssh_probe_without_session_get: "1",
+        },
+        signal: new AbortController().signal,
+        testedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+        pluginURL,
+        writeProgress: (message) => progress.push(message),
+        writeWarning: (message) => warnings.push(message),
+      })
+    ).rejects.toThrow(
+      /client\.session\.get required for Task safety.*SSH connection was not started/u
+    )
+    expect(progress).toEqual([
+      "checking OpenCode compatibility...",
+      `testing OpenCode ${TASK_RESUME_QUALIFIED_OPENCODE_VERSION} plugin loader...`,
+    ])
+    expect(warnings).toEqual([])
+  })
+
+  it.each([
+    [
+      "missing",
+      { npm_config_opencode_ssh_probe_without_runtime_version: "1" },
+    ],
+    [
+      "malformed",
+      { npm_config_opencode_ssh_probe_runtime_version: "v1.18.18" },
+    ],
+  ])("rejects a %s loader health version", async (_name, probeEnv) => {
+    await expect(
+      runOpenCodeCompatibilityCheck({
+        binary: fakeOpenCode,
+        env: {
+          ...process.env,
+          FAKE_OPENCODE_VERSION_STDOUT: `${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}\n`,
+          ...probeEnv,
+        },
+        signal: new AbortController().signal,
+        testedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+        pluginURL,
+      })
+    ).rejects.toThrow(/plugin loader returned an invalid result/u)
+  })
+
+  it("rejects a probe marker with additional fields", async () => {
+    const { testedOpenCodeVersion } = await readPackageMetadata()
+
+    await expect(
+      runOpenCodeCompatibilityCheck({
+        binary: fakeOpenCode,
+        env: {
+          ...process.env,
+          npm_config_opencode_ssh_probe_extra_field: "1",
+        },
+        signal: new AbortController().signal,
+        testedVersion: testedOpenCodeVersion,
+        pluginURL,
+      })
+    ).rejects.toThrow(/plugin loader returned an invalid result/u)
   })
 
   it("forwards lowercase proxy settings needed by the loader", async () => {
-    const { testedOpenCodeVersion } = await readPackageMetadata()
     const proxy = "http://proxy.example.invalid:8080"
 
     await expect(
@@ -55,14 +169,23 @@ describe("OpenCode compatibility preflight", () => {
         binary: fakeOpenCode,
         env: {
           ...process.env,
+          FAKE_OPENCODE_VERSION_STDOUT: `${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}\n`,
+          npm_config_opencode_ssh_probe_runtime_version:
+            TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
           https_proxy: proxy,
           npm_config_opencode_ssh_expected_https_proxy: proxy,
         },
         signal: new AbortController().signal,
-        testedVersion: testedOpenCodeVersion,
+        testedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
         pluginURL,
       })
-    ).resolves.toBeUndefined()
+    ).resolves.toEqual({
+      detectedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+      loaderRuntimeVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+      loaderRuntimeVersionSource: "runtime-executable",
+      callableSessionLookupObservedInLoaderProcess: true,
+      taskResumeQualified: true,
+    })
   })
 
   it("fails when the OpenCode version cannot be identified", async () => {
@@ -121,7 +244,7 @@ describe("OpenCode compatibility preflight", () => {
     ).rejects.toThrow(/version check exited with code 7/u)
   })
 
-  it("derives the tested version from the exact plugin dependency", async () => {
+  it("derives the loader-tested version from the exact plugin dependency", async () => {
     const metadata = await readPackageMetadata()
     expect(metadata.version).toMatch(/^\d+\.\d+\.\d+/u)
     expect(metadata.testedOpenCodeVersion).toMatch(/^\d+\.\d+\.\d+/u)

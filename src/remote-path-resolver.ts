@@ -11,6 +11,31 @@ import type { SSHPool } from "./ssh-pool.js"
 
 export const REMOTE_REALPATH_TIMEOUT_MS = 10_000
 
+export interface ResolvedMutationPath {
+  readonly remotePath: string
+  revalidate(signal: AbortSignal): Promise<void>
+}
+
+export class RemotePathChangedError extends Error {
+  readonly code = "REMOTE_PATH_CHANGED"
+
+  constructor(
+    readonly expectedPath: string,
+    readonly actualPath: string | undefined,
+    options?: ErrorOptions
+  ) {
+    super(
+      `Remote mutation path changed after authorization: expected ${expectedPath}, found ${
+        actualPath ?? "no resolvable target or parent"
+      }`,
+      options
+    )
+    this.name = "RemotePathChangedError"
+  }
+}
+
+class MutationPathUnavailableError extends Error {}
+
 export class RemotePathResolver {
   readonly remoteRoot: string
 
@@ -34,26 +59,56 @@ export class RemotePathResolver {
     return canonical
   }
 
-  async resolveMutation(input: string, ctx: ToolContext): Promise<string> {
+  async resolveMutation(
+    input: string,
+    ctx: ToolContext
+  ): Promise<ResolvedMutationPath> {
     const { lexical, externalAuthorized } = await this.prepare(input, ctx)
+    const canonical = await this.resolveMutationCanonical(lexical, ctx.abort)
+    if (!externalAuthorized) {
+      await requestExternalDirectory(ctx, this.remoteRoot, canonical)
+    }
+
+    return Object.freeze({
+      remotePath: canonical,
+      revalidate: async (signal: AbortSignal) => {
+        let actual: string | undefined
+        try {
+          actual = await this.resolveMutationCanonical(lexical, signal)
+        } catch (cause) {
+          if (cause instanceof MutationPathUnavailableError) {
+            throw new RemotePathChangedError(canonical, undefined, { cause })
+          }
+          throw cause
+        }
+        if (actual !== canonical) {
+          throw new RemotePathChangedError(canonical, actual)
+        }
+      },
+    })
+  }
+
+  private async resolveMutationCanonical(
+    lexical: string,
+    signal: AbortSignal
+  ): Promise<string> {
     let candidate = lexical
     const missing: string[] = []
 
     while (true) {
-      const canonicalAncestor = await this.tryRealpath(candidate, ctx.abort)
+      const canonicalAncestor = await this.tryRealpath(candidate, signal)
       if (canonicalAncestor !== undefined) {
         const canonical = path.posix.join(canonicalAncestor, ...missing)
         if (normalizeRemotePath("/", canonical) !== canonical) {
           throw new Error(`Remote path resolution produced a non-canonical path: ${canonical}`)
         }
-        if (!externalAuthorized) {
-          await requestExternalDirectory(ctx, this.remoteRoot, canonical)
-        }
         return canonical
       }
 
       if (candidate === "/") {
-        throw new Error(`No existing remote ancestor could be resolved for: ${lexical}`)
+        throw new MutationPathUnavailableError(
+          `No existing remote ancestor could be resolved for: ${lexical}`
+        )
       }
 
       const component = path.posix.basename(candidate)

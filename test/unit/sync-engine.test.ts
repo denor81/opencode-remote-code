@@ -11,6 +11,7 @@ import {
   rm,
   rmdir,
   stat,
+  symlink,
   unlink,
   writeFile,
 } from "node:fs/promises"
@@ -36,8 +37,10 @@ import {
   RemoteFileConflict,
   RemoteFileLockError,
   SyncEngine,
+  type SyncTransaction,
 } from "../../src/sync-engine.js"
 import { createReadTool } from "../../src/tools/read.js"
+import { createEditTool } from "../../src/tools/edit.js"
 import { createPatchTool } from "../../src/tools/patch.js"
 import { createWriteTool } from "../../src/tools/write.js"
 
@@ -53,6 +56,123 @@ afterEach(async () => {
 })
 
 describe("SyncEngine", () => {
+  it("rejects an aborted queued transaction promptly without admitting it or a successor", async () => {
+    const pool = await createRemotePool()
+    const fixture = await createEngine(pool)
+    const activeEntered = deferred()
+    const releaseActive = deferred()
+    const successorEntered = deferred()
+    const order: string[] = []
+    const active = fixture.engine.transaction(async () => {
+      order.push("active")
+      activeEntered.resolve()
+      await releaseActive.promise
+    })
+    await activeEntered.promise
+
+    const controller = new AbortController()
+    const canceled = fixture.engine.transaction(async () => {
+      order.push("canceled")
+      await mkdir(path.dirname(fixture.mapper.toLocal("/workspace/should-not-exist.txt")), {
+        recursive: true,
+      })
+      await writeFile(
+        fixture.mapper.toLocal("/workspace/should-not-exist.txt"),
+        "unexpected local side effect\n"
+      )
+      await pool.exec("mkdir -p /workspace/should-not-exist")
+    }, controller.signal)
+    const successor = fixture.engine.transaction(async () => {
+      order.push("successor")
+      successorEntered.resolve()
+    })
+
+    controller.abort()
+    const promptResult = await Promise.race([
+      canceled.then(
+        () => "resolved",
+        (error: unknown) => (error as Error).name
+      ),
+      delay(100).then(() => "timed out"),
+    ])
+
+    expect(promptResult).toBe("AbortError")
+    expect(order).toEqual(["active"])
+    expect(pool.commands).toEqual([])
+    await expect(stat(fixture.mapper.toLocal("/workspace/should-not-exist.txt"))).rejects.toThrow()
+
+    releaseActive.resolve()
+    await active
+    await successorEntered.promise
+    await successor
+    await expect(canceled).rejects.toMatchObject({ name: "AbortError" })
+    expect(order).toEqual(["active", "successor"])
+  })
+
+  it("passes each file tool AbortSignal into transaction admission", async () => {
+    const pool = await createRemotePool()
+    await pool.writeRemote("/workspace/tool-signal.txt", "before\n")
+    const fixture = await createEngine(pool)
+    const controller = new AbortController()
+    const ctx = toolContext(async () => {}, "signal-session", controller.signal)
+    const observed: Array<AbortSignal | undefined> = []
+    const stop = new Error("stop at transaction admission")
+    fixture.engine.transaction = (async (
+      _operation: (transaction: SyncTransaction) => Promise<unknown>,
+      signal?: AbortSignal
+    ) => {
+      observed.push(signal)
+      throw stop
+    }) as typeof fixture.engine.transaction
+
+    const calls = [
+      () =>
+        createReadTool(fixture.mapper, fixture.engine, pool, fixture.resolver).execute(
+          { filePath: "/workspace/tool-signal.txt" },
+          ctx
+        ),
+      () =>
+        createWriteTool(fixture.mapper, fixture.engine, fixture.resolver).execute(
+          { filePath: "/workspace/tool-signal.txt", content: "after\n" },
+          ctx
+        ),
+      () =>
+        createEditTool(fixture.mapper, fixture.engine, fixture.resolver).execute(
+          { filePath: "/workspace/tool-signal.txt", oldString: "before", newString: "after" },
+          ctx
+        ),
+      () =>
+        createPatchTool(
+          config(fixture.mapper.mirrorBase),
+          fixture.mapper,
+          fixture.engine,
+          fixture.resolver
+        ).execute(
+          {
+            patchText: [
+              "*** Begin Patch",
+              "*** Update File: tool-signal.txt",
+              "@@",
+              "-before",
+              "+after",
+              "*** End Patch",
+            ].join("\n"),
+          },
+          ctx
+        ),
+    ]
+
+    for (const call of calls) {
+      await expect(call()).rejects.toBe(stop)
+    }
+    expect(observed).toEqual([
+      controller.signal,
+      controller.signal,
+      controller.signal,
+      controller.signal,
+    ])
+  })
+
   it("never uploads A after reading A and writing B", async () => {
     const pool = await createRemotePool()
     await pool.writeRemote("/workspace/a.txt", "A remains remote\n")
@@ -75,6 +195,7 @@ describe("SyncEngine", () => {
     expect(await pool.readRemote("/workspace/a.txt")).toBe("A remains remote\n")
     expect(await pool.readRemote("/workspace/b.txt")).toBe("B after\n")
     expect(pool.downloads).toEqual([
+      "/workspace/b.txt",
       "/workspace/b.txt",
       "/workspace/b.txt",
       "/workspace/b.txt",
@@ -111,7 +232,79 @@ describe("SyncEngine", () => {
     expect(await pool.readRemote("/workspace/bom.txt")).toBe("\ufeffnew value\n")
   })
 
-  it("throws RemoteFileConflict without replacing a second writer's content", async () => {
+  it("rejects a missing component that becomes a symlink while waiting for admission", async () => {
+    const pool = await createRemotePool()
+    await pool.writeRemote("/outside/anchor.txt", "outside anchor\n")
+    const fixture = await createEngine(pool)
+    const activeEntered = deferred()
+    const releaseActive = deferred()
+    const active = fixture.engine.transaction(async () => {
+      activeEntered.resolve()
+      await releaseActive.promise
+    })
+    await activeEntered.promise
+
+    const write = createWriteTool(fixture.mapper, fixture.engine, fixture.resolver).execute(
+      { filePath: "/workspace/new-parent/target.txt", content: "must not escape\n" },
+      toolContext()
+    )
+    await waitForCommand(pool, "realpath -e -- /workspace")
+    await pool.symlinkRemote("/workspace/new-parent", "/outside")
+    const remoteActivityAtAdmission = {
+      commands: pool.commands.length,
+      downloads: pool.downloadAttempts.length,
+      uploads: pool.uploads.length,
+    }
+
+    releaseActive.resolve()
+    await active
+    const error = await write.catch((value: unknown) => value)
+
+    expect(error).toMatchObject({
+      code: "REMOTE_PATH_CHANGED",
+      expectedPath: "/workspace/new-parent/target.txt",
+      actualPath: "/outside/target.txt",
+    })
+    expect(pool.downloadAttempts).toHaveLength(remoteActivityAtAdmission.downloads)
+    expect(pool.uploads).toHaveLength(remoteActivityAtAdmission.uploads)
+    expect(pool.commands.slice(remoteActivityAtAdmission.commands)).toEqual([
+      "realpath -e -- /workspace/new-parent/target.txt",
+      "realpath -e -- /workspace/new-parent",
+    ])
+    await expect(pool.statRemote("/outside/target.txt")).rejects.toThrow()
+  })
+
+  it("revalidates the original canonical intent again at final commit", async () => {
+    const pool = await createRemotePool()
+    await pool.writeRemote("/workspace/first/target.txt", "first baseline\n")
+    await pool.writeRemote("/workspace/second/target.txt", "second baseline\n")
+    await pool.symlinkRemote("/workspace/link", "/workspace/first")
+    const fixture = await createEngine(pool)
+    pool.afterNextUpload = async () => {
+      await pool.replaceSymlinkRemote("/workspace/link", "/workspace/second")
+    }
+
+    const error = await createWriteTool(
+      fixture.mapper,
+      fixture.engine,
+      fixture.resolver
+    ).execute(
+      { filePath: "/workspace/link/target.txt", content: "our replacement\n" },
+      toolContext()
+    ).catch((value: unknown) => value)
+
+    expect(error).toMatchObject({
+      code: "REMOTE_PATH_CHANGED",
+      expectedPath: "/workspace/first/target.txt",
+      actualPath: "/workspace/second/target.txt",
+    })
+    expect(await pool.readRemote("/workspace/first/target.txt")).toBe("first baseline\n")
+    expect(await pool.readRemote("/workspace/second/target.txt")).toBe("second baseline\n")
+    expect(pool.commands.filter((command) => command.startsWith("mv "))).toEqual([])
+    expect(await pool.listRemote("/workspace/first")).toEqual(["target.txt"])
+  })
+
+  it("rejects a stale same-path writer from an independent engine", async () => {
     const pool = await createRemotePool()
     await pool.writeRemote("/workspace/shared.txt", "original\n")
     const first = await createEngine(pool)
@@ -154,6 +347,228 @@ describe("SyncEngine", () => {
     expect(await pool.listRemote("/workspace")).toEqual(["safe.txt"])
   })
 
+  it("precreates the upload sibling with mode 0600 before SFTP writes it", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/private-temp.txt"
+    await pool.writeRemote(remotePath, "before\n", 0o664)
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    let observedMode: number | undefined
+    pool.beforeNextUpload = async () => {
+      const remoteTemp = pool.uploads.at(-1)
+      if (!remoteTemp) throw new Error("Expected a remote upload path")
+      observedMode = (await pool.statRemote(remoteTemp)).mode & 0o777
+    }
+
+    await fixture.engine.push(remotePath)
+
+    expect(observedMode).toBe(0o600)
+    expect((await pool.statRemote(remotePath)).mode & 0o777).toBe(0o664)
+  })
+
+  it("does not delete an unconfirmed temp when creation transport throws before execution", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/temp-throw-before.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    pool.throwBeforeNextTempCreate = true
+    pool.beforeNextTempCreate = (remoteTemp) =>
+      pool.writeRemote(remoteTemp, "foreign before execution\n", 0o640)
+
+    const error = await fixture.engine.push(remotePath).catch((value: unknown) => value)
+    const remoteTemp = pool.tempCreateAttempts[0]
+
+    expect(error).toBeInstanceOf(AggregateError)
+    expect((error as AggregateError).errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "REMOTE_ARTIFACT_CLEANUP_FAILED",
+          artifactPaths: [remoteTemp],
+        }),
+      ])
+    )
+    expect(flattenErrorMessages(error)).toContain("injected temp creation throw before execution")
+    expect(flattenErrorMessages(error)).toContain(remoteTemp)
+    expect(pool.commands).not.toContain(`rm -f -- ${remoteTemp}`)
+    expect(await pool.readRemote(remoteTemp)).toBe("foreign before execution\n")
+    expect((await pool.statRemote(remoteTemp)).mode & 0o777).toBe(0o640)
+    expect(await pool.readRemote(remotePath)).toBe("before\n")
+  })
+
+  it("reports but does not delete an unconfirmed temp when creation transport throws after execution", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/temp-throw-after.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    pool.throwAfterNextTempCreate = true
+
+    const error = await fixture.engine.push(remotePath).catch((value: unknown) => value)
+    const remoteTemp = pool.tempCreateAttempts[0]
+
+    expect(error).toBeInstanceOf(AggregateError)
+    expect((error as AggregateError).errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "REMOTE_ARTIFACT_CLEANUP_FAILED",
+          artifactPaths: [remoteTemp],
+        }),
+      ])
+    )
+    expect(flattenErrorMessages(error)).toContain("injected temp creation throw after execution")
+    expect(flattenErrorMessages(error)).toContain(remoteTemp)
+    expect(pool.commands).not.toContain(`rm -f -- ${remoteTemp}`)
+    expect(await pool.readRemote(remoteTemp)).toBe("")
+    expect((await pool.statRemote(remoteTemp)).mode & 0o777).toBe(0o600)
+    expect(await pool.readRemote(remotePath)).toBe("before\n")
+  })
+
+  it("does not delete a foreign temp after a confirmed creation collision", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/temp-collision.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    pool.beforeNextTempCreate = (remoteTemp) =>
+      pool.writeRemote(remoteTemp, "foreign temp\n", 0o640)
+
+    const error = await fixture.engine.push(remotePath).catch((value: unknown) => value)
+    const remoteTemp = pool.tempCreateAttempts[0]
+
+    expect(flattenErrorMessages(error)).toContain("create private remote sibling")
+    expect(pool.commands).not.toContain(`rm -f -- ${remoteTemp}`)
+    expect(await pool.readRemote(remoteTemp)).toBe("foreign temp\n")
+    expect((await pool.statRemote(remoteTemp)).mode & 0o777).toBe(0o640)
+    expect(await pool.readRemote(remotePath)).toBe("before\n")
+  })
+
+  it("uses the mode from final validation after a concurrent chmod", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/final-mode.txt"
+    await pool.writeRemote(remotePath, "before\n", 0o640)
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    pool.afterNextUpload = () => pool.chmodRemote(remotePath, 0o600)
+
+    await fixture.engine.push(remotePath)
+
+    expect(await pool.readRemote(remotePath)).toBe("after\n")
+    expect((await pool.statRemote(remotePath)).mode & 0o777).toBe(0o600)
+  })
+
+  it("uses no-target-directory replacement and rejects a destination directory", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/directory-target"
+    await pool.mkdirRemote("/workspace")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "must remain a file operation\n")
+    pool.beforeNextMove = () => pool.mkdirRemote(remotePath)
+
+    await expect(fixture.engine.push(remotePath)).rejects.toThrow(
+      /replace remote file|directory target/
+    )
+
+    expect((await pool.statRemote(remotePath)).isDirectory()).toBe(true)
+    expect(await pool.listRemote(remotePath)).toEqual([])
+    expect(pool.commands.some((command) => command.startsWith("mv -fT -- "))).toBe(true)
+  })
+
+  it("validates a stale baseline before recreating a removed parent", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/removed-parent/target.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    await pool.removeRemote("/workspace/removed-parent")
+
+    await expect(fixture.engine.push(remotePath)).rejects.toBeInstanceOf(
+      RemoteFileConflict
+    )
+
+    await expect(pool.statRemote("/workspace/removed-parent")).rejects.toThrow()
+    expect(pool.uploads).toEqual([])
+  })
+
+  it("removes only newly created empty parents after a failed upload", async () => {
+    const pool = await createRemotePool()
+    await pool.mkdirRemote("/workspace")
+    const remotePath = "/workspace/new/nested/target.txt"
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "new content\n")
+    pool.failNextUpload = true
+
+    await expect(fixture.engine.push(remotePath)).rejects.toThrow(
+      /injected upload failure/
+    )
+
+    expect((await pool.statRemote("/workspace")).isDirectory()).toBe(true)
+    await expect(pool.statRemote("/workspace/new")).rejects.toThrow()
+    expect(pool.uploads).toHaveLength(1)
+  })
+
+  it("cleans its uploaded temp and lock when the child aborts before final validation", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/child-aborted/target.txt"
+    const originalContent = "original destination\n"
+    const replacementContent = "aborted replacement\n"
+    await pool.writeRemote(remotePath, originalContent)
+    pool.reportRemoteModes = false
+    const fixture = await createEngine(pool)
+    const controller = new AbortController()
+    const lockPath = remoteLockPath(remotePath)
+    let uploadedTemp = ""
+
+    pool.afterNextUpload = async () => {
+      const tempPath = pool.uploads.at(-1)
+      if (!tempPath) throw new Error("Expected an uploaded sibling temporary")
+      uploadedTemp = tempPath
+      expect(await pool.readRemote(tempPath)).toBe(replacementContent)
+      expect((await pool.statRemote(lockPath)).isDirectory()).toBe(true)
+      expect(await pool.readRemote(remotePath)).toBe(originalContent)
+      controller.abort(new Error("abort after upload"))
+    }
+
+    const write = createWriteTool(fixture.mapper, fixture.engine, fixture.resolver).execute(
+      { filePath: remotePath, content: replacementContent },
+      toolContext(async () => {}, "child-session-aborted", controller.signal)
+    )
+
+    await expect(write).rejects.toMatchObject({ name: "AbortError" })
+
+    expect(controller.signal.aborted).toBe(true)
+    expect(uploadedTemp).toMatch(
+      /^\/workspace\/child-aborted\/\.target\.txt\.opencode-[a-f0-9]{24}\.tmp$/
+    )
+    expect(pool.uploads).toEqual([uploadedTemp])
+    expect(pool.uploadRecords).toHaveLength(1)
+    expect(pool.uploadRecords[0]?.content.toString("utf8")).toBe(replacementContent)
+    expect(pool.downloadAttempts.filter((value) => value === remotePath)).toHaveLength(3)
+    expect(pool.commands.filter((command) => command.startsWith("mv "))).toEqual([])
+    expect(pool.commands.filter((command) => command === `rm -f -- ${uploadedTemp}`)).toHaveLength(1)
+    expect(
+      pool.commands.filter(
+        (command) =>
+          command.startsWith("if [ \"$(cat --") &&
+          command.includes(`rmdir -- ${lockPath}`)
+      )
+    ).toHaveLength(1)
+    expect(await pool.readRemote(remotePath)).toBe(originalContent)
+    expect(await pool.listRemote("/workspace/child-aborted")).toEqual(["target.txt"])
+    expect(await readFile(fixture.mapper.toLocal(remotePath), "utf8")).toBe(
+      replacementContent
+    )
+    expect(await listLocalSyncArtifacts(fixture.mapper.mirrorBase)).toEqual([])
+  })
+
   it("preflights every pushMany baseline before the first upload", async () => {
     const pool = await createRemotePool()
     await pool.writeRemote("/workspace/one.txt", "one remote\n")
@@ -175,42 +590,173 @@ describe("SyncEngine", () => {
     expect(pool.downloads).toEqual(["/workspace/one.txt", "/workspace/two.txt"])
     expect(pool.uploads).toEqual([])
     expect(await pool.readRemote("/workspace/one.txt")).toBe("one remote\n")
+    expect(await pool.listRemote("/workspace")).toEqual(["one.txt", "two.txt"])
+    expect(await listLocalSyncArtifacts(fixture.mapper.mirrorBase)).toEqual([])
   })
 
-  it("holds one transaction across local work without nested facade deadlocks", async () => {
+  it("reports committed and failed paths after a second-file upload failure without rollback", async () => {
     const pool = await createRemotePool()
-    await pool.writeRemote("/workspace/shared.txt", "before\n")
+    const firstPath = "/workspace/a-first.txt"
+    const secondPath = "/workspace/b-second.txt"
+    await pool.writeRemote(firstPath, "first before\n")
+    await pool.writeRemote(secondPath, "second before\n")
     const fixture = await createEngine(pool)
-    let releaseFirst!: () => void
-    const firstCanFinish = new Promise<void>((resolve) => {
-      releaseFirst = resolve
+    await fixture.engine.pull(firstPath)
+    await fixture.engine.pull(secondPath)
+    await writeFile(fixture.mapper.toLocal(firstPath), "first after\n")
+    await writeFile(fixture.mapper.toLocal(secondPath), "second after\n")
+    pool.failUploadNumber = 2
+
+    const error = await fixture.engine
+      .pushMany([secondPath, firstPath])
+      .catch((value: unknown) => value)
+
+    expect(error).toMatchObject({
+      name: "SyncPartialCommitError",
+      code: "SYNC_PARTIAL_COMMIT",
+      committedPaths: [firstPath],
+      failedPaths: [secondPath],
+      uncertainPaths: [],
+      unattemptedPaths: [],
     })
-    let firstStarted!: () => void
-    const firstDidStart = new Promise<void>((resolve) => {
-      firstStarted = resolve
+    expect(flattenErrorMessages(error)).toContain("injected upload failure")
+    expect(await pool.readRemote(firstPath)).toBe("first after\n")
+    expect(await pool.readRemote(secondPath)).toBe("second before\n")
+    expect(pool.uploads).toHaveLength(2)
+  })
+
+  it("reports an uncertain second path when rename transport fails after dispatch", async () => {
+    const pool = await createRemotePool()
+    const firstPath = "/workspace/a-certain.txt"
+    const secondPath = "/workspace/b-uncertain.txt"
+    await pool.writeRemote(firstPath, "first before\n")
+    await pool.writeRemote(secondPath, "second before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(firstPath)
+    await fixture.engine.pull(secondPath)
+    await writeFile(fixture.mapper.toLocal(firstPath), "first after\n")
+    await writeFile(fixture.mapper.toLocal(secondPath), "second after\n")
+    pool.throwAfterMoveNumber = 2
+
+    const error = await fixture.engine
+      .pushMany([secondPath, firstPath])
+      .catch((value: unknown) => value)
+
+    expect(error).toMatchObject({
+      name: "SyncPartialCommitError",
+      code: "SYNC_PARTIAL_COMMIT",
+      committedPaths: [firstPath],
+      failedPaths: [],
+      uncertainPaths: [secondPath],
+      unattemptedPaths: [],
+    })
+    expect(flattenErrorMessages(error)).toContain("injected uncertain rename")
+    expect(await pool.readRemote(firstPath)).toBe("first after\n")
+    expect(await pool.readRemote(secondPath)).toBe("second after\n")
+    expect(pool.moveCount).toBe(2)
+  })
+
+  it("serializes distinct child writes through one shared operation boundary", async () => {
+    const pool = await createRemotePool()
+    const firstPath = "/workspace/child-alpha/first.txt"
+    const secondPath = "/workspace/child-beta/second.txt"
+    const firstContent = "alpha child only\n"
+    const secondContent = "beta child only\n"
+    await pool.writeRemote(firstPath, "alpha before\n")
+    await pool.writeRemote(secondPath, "beta before\n")
+    const fixture = await createEngine(pool)
+    const firstMayFinish = deferred()
+    const firstOwnsTransaction = deferred()
+    const secondTransactionRequested = deferred()
+    const originalTransaction = fixture.engine.transaction.bind(fixture.engine)
+    let transactionRequests = 0
+    let secondEnteredTransaction = false
+    fixture.engine.transaction = <T>(
+      operation: (transaction: SyncTransaction) => Promise<T>,
+      signal?: AbortSignal,
+      mutationPaths = []
+    ): Promise<T> => {
+      const requestNumber = ++transactionRequests
+      if (requestNumber === 2) secondTransactionRequested.resolve()
+      return originalTransaction(async (transaction) => {
+        if (requestNumber === 2) secondEnteredTransaction = true
+        return operation(transaction)
+      }, signal, mutationPaths)
+    }
+
+    const permissionScopes: Array<{ sessionID: string; remotePath: unknown }> = []
+    const firstContext = toolContext(async (input) => {
+      permissionScopes.push({
+        sessionID: "child-session-alpha",
+        remotePath: input.metadata.remotePath,
+      })
+      firstOwnsTransaction.resolve()
+      await firstMayFinish.promise
+    }, "child-session-alpha")
+    const secondContext = toolContext(async (input) => {
+      permissionScopes.push({
+        sessionID: "child-session-beta",
+        remotePath: input.metadata.remotePath,
+      })
+    }, "child-session-beta")
+    const writeTool = createWriteTool(fixture.mapper, fixture.engine, fixture.resolver)
+
+    const first = writeTool.execute(
+      { filePath: firstPath, content: firstContent },
+      firstContext
+    )
+    await firstOwnsTransaction.promise
+
+    const second = writeTool.execute(
+      { filePath: secondPath, content: secondContent },
+      secondContext
+    )
+    await secondTransactionRequested.promise
+
+    expect(firstContext.sessionID).not.toBe(secondContext.sessionID)
+    expect(transactionRequests).toBe(2)
+    expect(secondEnteredTransaction).toBe(false)
+    expect(pool.downloads).toEqual([firstPath])
+    expect(pool.uploads).toEqual([])
+    await expect(stat(fixture.mapper.toLocal(secondPath))).rejects.toThrow()
+
+    firstMayFinish.resolve()
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2)
+
+    expect(secondEnteredTransaction).toBe(true)
+    expect(permissionScopes).toEqual([
+      { sessionID: "child-session-alpha", remotePath: firstPath },
+      { sessionID: "child-session-beta", remotePath: secondPath },
+    ])
+    expect(await pool.readRemote(firstPath)).toBe(firstContent)
+    expect(await pool.readRemote(secondPath)).toBe(secondContent)
+    expect(pool.uploadRecords).toHaveLength(2)
+    expect(pool.uploadRecords[0]?.remotePath).toMatch(
+      /^\/workspace\/child-alpha\/\.first\.txt\.opencode-[a-f0-9]{24}\.tmp$/
+    )
+    expect(pool.uploadRecords[0]?.content.toString("utf8")).toBe(firstContent)
+    expect(pool.uploadRecords[1]?.remotePath).toMatch(
+      /^\/workspace\/child-beta\/\.second\.txt\.opencode-[a-f0-9]{24}\.tmp$/
+    )
+    expect(pool.uploadRecords[1]?.content.toString("utf8")).toBe(secondContent)
+
+    const savedManifest = JSON.parse(
+      await readFile(fixture.mapper.manifestPath(), "utf8")
+    ) as { remote_root: string; files: Record<string, string> }
+    expect(savedManifest).toEqual({
+      remote_root: "/workspace",
+      files: {
+        [firstPath]: "workspace/child-alpha/first.txt",
+        [secondPath]: "workspace/child-beta/second.txt",
+      },
     })
 
-    const first = fixture.engine.transaction(async (transaction) => {
-      await transaction.pull("/workspace/shared.txt")
-      await writeFile(fixture.mapper.toLocal("/workspace/shared.txt"), "after\n")
-      firstStarted()
-      await firstCanFinish
-      await transaction.push("/workspace/shared.txt")
-    })
-    await firstDidStart
-
-    let secondEntered = false
-    const second = fixture.engine.transaction(async (transaction) => {
-      secondEntered = true
-      await transaction.pull("/workspace/shared.txt")
-      return readFile(fixture.mapper.toLocal("/workspace/shared.txt"), "utf8")
-    })
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(secondEntered).toBe(false)
-
-    releaseFirst()
-    await first
-    await expect(second).resolves.toBe("after\n")
+    const uploadCount = pool.uploads.length
+    await expect(fixture.engine.pushMany([secondPath, firstPath])).resolves.toBeUndefined()
+    expect(pool.uploads).toHaveLength(uploadCount)
+    expect(await listLocalSyncArtifacts(fixture.mapper.mirrorBase)).toEqual([])
+    expect(await pool.listRemote("/workspace/child-alpha")).toEqual(["first.txt"])
+    expect(await pool.listRemote("/workspace/child-beta")).toEqual(["second.txt"])
   })
 
   it("fails closed on a stale deterministic remote lock", async () => {
@@ -222,6 +768,8 @@ describe("SyncEngine", () => {
     await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
     const lockPath = remoteLockPath(remotePath)
     await pool.exec(`mkdir ${lockPath}`)
+    await pool.writeRemote(`${lockPath}/owner`, "unknown-owner", 0o600)
+    pool.commands.length = 0
     pool.uploads.length = 0
 
     const error = await fixture.engine.push(remotePath).catch((value: unknown) => value)
@@ -234,6 +782,189 @@ describe("SyncEngine", () => {
     })
     expect(pool.uploads).toEqual([])
     expect(await pool.readRemote(remotePath)).toBe("before\n")
+    expect(await pool.readRemote(`${lockPath}/owner`)).toBe("unknown-owner")
+    expect((await pool.statRemote(lockPath)).isDirectory()).toBe(true)
+    expect(pool.commands.some((command) => command.includes("cat --"))).toBe(false)
+    expect(await pool.listRemote("/workspace")).toEqual(
+      [path.posix.basename(lockPath), "locked.txt"].sort()
+    )
+    expect(await listLocalSyncArtifacts(fixture.mapper.mirrorBase)).toEqual([])
+  })
+
+  it("stores a private cryptographic owner token in every acquired lock", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/owned-lock.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    const lockPath = remoteLockPath(remotePath)
+    let ownerToken = ""
+    pool.beforeNextUpload = async () => {
+      ownerToken = await pool.readRemote(`${lockPath}/owner`)
+      expect((await pool.statRemote(`${lockPath}/owner`)).mode & 0o777).toBe(0o600)
+    }
+
+    await fixture.engine.push(remotePath)
+
+    expect(ownerToken).toMatch(/^[a-f0-9]{64}$/)
+    await expect(pool.statRemote(lockPath)).rejects.toThrow()
+  })
+
+  it("conditionally removes only its token after an uncertain lock acquisition", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/uncertain-lock.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    const lockPath = remoteLockPath(remotePath)
+    pool.throwAfterNextLockOwnerWrite = true
+
+    const error = await fixture.engine.push(remotePath).catch((value: unknown) => value)
+
+    expect(String(error)).toContain("injected uncertain lock acquisition")
+    expect(pool.commands.some((command) => command.includes("cat --") && command.includes(lockPath))).toBe(true)
+    await expect(pool.statRemote(lockPath)).rejects.toThrow()
+    expect(pool.uploads).toEqual([])
+  })
+
+  it("self-cleans an empty lock after a returned owner-write failure", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/owner-write-cleaned.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    const lockPath = remoteLockPath(remotePath)
+    pool.nextLockOwnerWriteFailureCleanup = "succeed"
+
+    const error = await fixture.engine.push(remotePath).catch((value: unknown) => value)
+
+    expect(error).toBeInstanceOf(RemoteFileLockError)
+    expect(error).not.toBeInstanceOf(AggregateError)
+    expect(flattenErrorMessages(error)).toContain("injected lock owner write failure")
+    await expect(pool.statRemote(lockPath)).rejects.toThrow()
+    expect(pool.commands.some((command) => command.includes("cat --"))).toBe(false)
+    expect(pool.uploads).toEqual([])
+  })
+
+  it("reports an owned lock artifact when owner-write self-clean fails", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/owner-write-cleanup-failed.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    const lockPath = remoteLockPath(remotePath)
+    pool.nextLockOwnerWriteFailureCleanup = "fail"
+
+    const error = await fixture.engine.push(remotePath).catch((value: unknown) => value)
+
+    expect(error).toBeInstanceOf(AggregateError)
+    expect((error as AggregateError).errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "REMOTE_ARTIFACT_CLEANUP_FAILED",
+          artifactPaths: [lockPath],
+        }),
+      ])
+    )
+    expect(flattenErrorMessages(error)).toContain("injected lock owner write failure")
+    expect(flattenErrorMessages(error)).toContain(lockPath)
+    expect((await pool.statRemote(lockPath)).isDirectory()).toBe(true)
+    expect(pool.commands.some((command) => command.includes("cat --"))).toBe(false)
+    expect(pool.uploads).toEqual([])
+  })
+
+  it("reports unresolved ownership when lock transport throws before owner write", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/lock-throw-before-owner.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    const lockPath = remoteLockPath(remotePath)
+    pool.throwBeforeNextLockOwnerWrite = true
+
+    const error = await fixture.engine.push(remotePath).catch((value: unknown) => value)
+
+    expect(error).toBeInstanceOf(AggregateError)
+    expect((error as AggregateError).errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "REMOTE_ARTIFACT_CLEANUP_FAILED",
+          artifactPaths: [lockPath],
+        }),
+      ])
+    )
+    expect(flattenErrorMessages(error)).toContain("injected lock throw before owner write")
+    expect(flattenErrorMessages(error)).toContain(lockPath)
+    expect((await pool.statRemote(lockPath)).isDirectory()).toBe(true)
+    await expect(pool.statRemote(`${lockPath}/owner`)).rejects.toThrow()
+    expect(pool.commands.some((command) => command.includes("cat --"))).toBe(true)
+    expect(pool.uploads).toEqual([])
+  })
+
+  it("never releases a replacement lock with another owner's token", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/replaced-lock.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    const lockPath = remoteLockPath(remotePath)
+    const replacementToken = "b".repeat(64)
+    pool.beforeNextLockRelease = async () => {
+      await pool.removeRemote(lockPath)
+      await pool.mkdirRemote(lockPath)
+      await pool.writeRemote(`${lockPath}/owner`, replacementToken, 0o600)
+    }
+
+    const error = await fixture.engine.push(remotePath).catch((value: unknown) => value)
+
+    expect(String(error)).toContain(lockPath)
+    expect(await pool.readRemote(`${lockPath}/owner`)).toBe(replacementToken)
+    expect((await pool.statRemote(lockPath)).isDirectory()).toBe(true)
+    expect(await pool.readRemote(remotePath)).toBe("after\n")
+  })
+
+  it("aggregates temp cleanup failure with the primary upload failure and artifact path", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/temp-cleanup.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    pool.failNextUpload = true
+    pool.failNextTempCleanup = true
+
+    const error = await fixture.engine.push(remotePath).catch((value: unknown) => value)
+    const remoteTemp = pool.uploads[0]
+
+    expect(error).toBeInstanceOf(AggregateError)
+    expect(flattenErrorMessages(error)).toContain("injected upload failure")
+    expect(flattenErrorMessages(error)).toContain(remoteTemp)
+    expect(await pool.readRemote(remoteTemp)).toBe("partial upload")
+  })
+
+  it("aggregates lock release failure with a primary mutation failure", async () => {
+    const pool = await createRemotePool()
+    const remotePath = "/workspace/lock-cleanup.txt"
+    await pool.writeRemote(remotePath, "before\n")
+    const fixture = await createEngine(pool)
+    await fixture.engine.pull(remotePath)
+    await writeFile(fixture.mapper.toLocal(remotePath), "after\n")
+    pool.failNextUpload = true
+    pool.failNextLockRelease = true
+    const lockPath = remoteLockPath(remotePath)
+
+    const error = await fixture.engine.push(remotePath).catch((value: unknown) => value)
+
+    expect(error).toBeInstanceOf(AggregateError)
+    const messages = flattenErrorMessages(error)
+    expect(messages).toContain("injected upload failure")
+    expect(messages).toContain(lockPath)
     expect((await pool.statRemote(lockPath)).isDirectory()).toBe(true)
   })
 
@@ -254,16 +985,14 @@ describe("SyncEngine", () => {
 
     const firstLock = remoteLockPath(firstPath)
     const secondLock = remoteLockPath(secondPath)
-    expect(
-      pool.commands.filter(
-        (command) => command.startsWith("mkdir /workspace/.opencode-lock-") || command.startsWith("rmdir ")
-      )
-    ).toEqual([
-      `mkdir ${firstLock}`,
-      `mkdir ${secondLock}`,
-      `rmdir ${secondLock}`,
-      `rmdir ${firstLock}`,
-    ])
+    const lockCommands = pool.commands.filter((command) =>
+      command.includes(".opencode-lock-")
+    )
+    expect(lockCommands).toHaveLength(4)
+    expect(lockCommands[0]).toMatch(new RegExp(`^if mkdir -- ${escapeRegex(firstLock)} .*`))
+    expect(lockCommands[1]).toMatch(new RegExp(`^if mkdir -- ${escapeRegex(secondLock)} .*`))
+    expect(lockCommands[2]).toContain(`rmdir -- ${secondLock}`)
+    expect(lockCommands[3]).toContain(`rmdir -- ${firstLock}`)
   })
 
   it("revalidates immediately before rename and keeps a racing writer's content", async () => {
@@ -407,6 +1136,7 @@ describe("remote patch mutations", () => {
     expect(permission?.metadata.diff).toContain("+first")
     expect(permission?.metadata.diff).toContain("+second")
     expect(await pool.readRemote("/workspace/added.txt")).toBe("first\nsecond")
+    expect((await pool.statRemote("/workspace/added.txt")).mode & 0o777).toBe(0o600)
   })
 
   it("pulls sorted paths and asks with every computed diff before writing mirrors", async () => {
@@ -608,13 +1338,30 @@ describe("SftpClient cancellation", () => {
 })
 
 class FakeRemotePool implements SSHPool {
+  readonly downloadAttempts: string[] = []
   readonly downloads: string[] = []
   readonly uploads: string[] = []
+  readonly uploadRecords: Array<{ remotePath: string; content: Buffer }> = []
   readonly commands: string[] = []
+  readonly tempCreateAttempts: string[] = []
   failNextUpload = false
+  failUploadNumber: number | undefined
+  failNextTempCleanup = false
+  failNextLockRelease = false
+  throwBeforeNextTempCreate = false
+  throwAfterNextTempCreate = false
+  beforeNextTempCreate: ((remoteTemp: string) => Promise<void>) | undefined
+  nextLockOwnerWriteFailureCleanup: "succeed" | "fail" | undefined
+  throwBeforeNextLockOwnerWrite = false
+  throwAfterNextLockOwnerWrite = false
+  throwAfterMoveNumber: number | undefined
+  moveCount = 0
+  reportRemoteModes = true
   nextDownloadError: Error | undefined
   beforeNextUpload: (() => Promise<void>) | undefined
   afterNextUpload: (() => Promise<void>) | undefined
+  beforeNextMove: (() => Promise<void>) | undefined
+  beforeNextLockRelease: (() => Promise<void>) | undefined
 
   constructor(private readonly root: string) {}
 
@@ -623,6 +1370,7 @@ class FakeRemotePool implements SSHPool {
     localPath: string,
     options: SftpTransferOptions = {}
   ): Promise<void> {
+    this.downloadAttempts.push(remotePath)
     throwIfAborted(options.signal)
     this.downloads.push(remotePath)
     if (this.nextDownloadError) {
@@ -650,19 +1398,30 @@ class FakeRemotePool implements SSHPool {
   ): Promise<void> {
     throwIfAborted(options.signal)
     this.uploads.push(remotePath)
+    this.uploadRecords.push({ remotePath, content: await readFile(localPath) })
     const destination = this.localRemotePath(remotePath)
-    await mkdir(path.dirname(destination), { recursive: true })
     if (this.beforeNextUpload) {
       const beforeUpload = this.beforeNextUpload
       this.beforeNextUpload = undefined
       await beforeUpload()
     }
-    if (this.failNextUpload) {
+    if (this.failNextUpload || this.uploads.length === this.failUploadNumber) {
       this.failNextUpload = false
       await writeFile(destination, "partial upload")
       throw new Error("injected upload failure")
     }
-    await copyFile(localPath, destination)
+    const destinationExists = await stat(destination).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false
+        throw error
+      }
+    )
+    if (destinationExists) {
+      await writeFile(destination, await readFile(localPath))
+    } else {
+      await copyFile(localPath, destination)
+    }
     if (this.afterNextUpload) {
       const afterUpload = this.afterNextUpload
       this.afterNextUpload = undefined
@@ -714,6 +1473,7 @@ class FakeRemotePool implements SSHPool {
 
     const statMatch = command.match(/^stat -c %a (\S+) 2>\/dev\/null$/)
     if (statMatch) {
+      if (!this.reportRemoteModes) return commandResult("", "", 1)
       try {
         const info = await stat(this.localRemotePath(statMatch[1]))
         return commandResult(`${(info.mode & 0o7777).toString(8)}\n`)
@@ -729,6 +1489,66 @@ class FakeRemotePool implements SSHPool {
       return commandResult()
     }
 
+    const trackedMkdirMatch = command.match(
+      /^if mkdir -- (\S+) 2>\/dev\/null; then printf CREATED; elif \[ -d \1 \]; then printf EXISTS; else exit 1; fi$/
+    )
+    if (trackedMkdirMatch) {
+      try {
+        await mkdir(this.localRemotePath(trackedMkdirMatch[1]))
+        return commandResult("CREATED")
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === "EEXIST") {
+          const info = await stat(this.localRemotePath(trackedMkdirMatch[1])).catch(() => undefined)
+          if (info?.isDirectory()) return commandResult("EXISTS")
+        }
+        return commandResult("", `mkdir: ${code ?? "failed"}\n`, 1)
+      }
+    }
+
+    const lockAcquireMatch = command.match(
+      /^if mkdir -- (\S+) 2>\/dev\/null; then if \(umask 077; set -C; printf %s ([a-f0-9]{64}) > (\S+)\); then exit 0; fi; if rmdir -- \1 2>\/dev\/null; then exit 76; else exit 77; fi; elif \[ -e \1 \]; then exit 75; else exit 78; fi$/
+    )
+    if (lockAcquireMatch) {
+      const [, lockPath, token, ownerPath] = lockAcquireMatch
+      try {
+        await mkdir(this.localRemotePath(lockPath))
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        return commandResult(
+          "",
+          code === "EEXIST" ? "lock path already exists\n" : `mkdir: ${code ?? "failed"}\n`,
+          code === "EEXIST" ? 75 : 78
+        )
+      }
+      if (this.throwBeforeNextLockOwnerWrite) {
+        this.throwBeforeNextLockOwnerWrite = false
+        throw new Error("injected lock throw before owner write")
+      }
+      if (this.nextLockOwnerWriteFailureCleanup) {
+        const cleanup = this.nextLockOwnerWriteFailureCleanup
+        this.nextLockOwnerWriteFailureCleanup = undefined
+        if (cleanup === "fail") {
+          await writeFile(this.localRemotePath(ownerPath), "partial", {
+            flag: "wx",
+            mode: 0o600,
+          })
+        }
+        try {
+          await rmdir(this.localRemotePath(lockPath))
+          return commandResult("", "injected lock owner write failure\n", 76)
+        } catch {
+          return commandResult("", "injected lock owner write failure\n", 77)
+        }
+      }
+      await writeFile(this.localRemotePath(ownerPath), token, { flag: "wx", mode: 0o600 })
+      if (this.throwAfterNextLockOwnerWrite) {
+        this.throwAfterNextLockOwnerWrite = false
+        throw new Error("injected uncertain lock acquisition after owner write")
+      }
+      return commandResult()
+    }
+
     const lockMkdirMatch = command.match(/^mkdir (\S+)$/)
     if (lockMkdirMatch) {
       try {
@@ -740,8 +1560,43 @@ class FakeRemotePool implements SSHPool {
       }
     }
 
-    const rmdirMatch = command.match(/^rmdir (\S+)$/)
+    const lockReleaseMatch = command.match(
+      /^if \[ "\$\(cat -- (\S+) 2>\/dev\/null\)" = ([a-f0-9]{64}) \]; then rm -f -- \1 && rmdir -- (\S+); else exit 73; fi$/
+    )
+    if (lockReleaseMatch) {
+      const [, ownerPath, token, lockPath] = lockReleaseMatch
+      if (this.beforeNextLockRelease) {
+        const beforeRelease = this.beforeNextLockRelease
+        this.beforeNextLockRelease = undefined
+        await beforeRelease()
+      }
+      if (this.failNextLockRelease) {
+        this.failNextLockRelease = false
+        return commandResult("", "injected lock release failure\n", 1)
+      }
+      const actual = await readFile(this.localRemotePath(ownerPath), "utf8").catch(() => "")
+      if (actual !== token) return commandResult("", "lock owner token mismatch\n", 73)
+      await unlink(this.localRemotePath(ownerPath))
+      try {
+        await rmdir(this.localRemotePath(lockPath))
+        return commandResult()
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        return commandResult("", `rmdir: ${code ?? "failed"}\n`, 1)
+      }
+    }
+
+    const rmdirMatch = command.match(/^rmdir(?: --)? (\S+)$/)
     if (rmdirMatch) {
+      if (this.beforeNextLockRelease && rmdirMatch[1].includes(".opencode-lock-")) {
+        const beforeRelease = this.beforeNextLockRelease
+        this.beforeNextLockRelease = undefined
+        await beforeRelease()
+      }
+      if (this.failNextLockRelease && rmdirMatch[1].includes(".opencode-lock-")) {
+        this.failNextLockRelease = false
+        return commandResult("", "injected lock release failure\n", 1)
+      }
       try {
         await rmdir(this.localRemotePath(rmdirMatch[1]))
         return commandResult()
@@ -751,20 +1606,81 @@ class FakeRemotePool implements SSHPool {
       }
     }
 
-    const chmodMatch = command.match(/^chmod ([0-7]{3,4}) (\S+)$/)
+    const privateTempMatch = command.match(
+      /^if \(umask 077; set -C; : > (\S+)\); then if chmod 600 -- \1; then exit 0; else exit 79; fi; else exit 74; fi$/
+    )
+    if (privateTempMatch) {
+      const remoteTemp = privateTempMatch[1]
+      this.tempCreateAttempts.push(remoteTemp)
+      if (this.beforeNextTempCreate) {
+        const beforeCreate = this.beforeNextTempCreate
+        this.beforeNextTempCreate = undefined
+        await beforeCreate(remoteTemp)
+      }
+      if (this.throwBeforeNextTempCreate) {
+        this.throwBeforeNextTempCreate = false
+        throw new Error("injected temp creation throw before execution")
+      }
+      try {
+        await writeFile(this.localRemotePath(remoteTemp), "", {
+          flag: "wx",
+          mode: 0o600,
+        })
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        return commandResult("", `create temp: ${code ?? "failed"}\n`, 74)
+      }
+      try {
+        await chmod(this.localRemotePath(remoteTemp), 0o600)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        return commandResult("", `chmod temp: ${code ?? "failed"}\n`, 79)
+      }
+      if (this.throwAfterNextTempCreate) {
+        this.throwAfterNextTempCreate = false
+        throw new Error("injected temp creation throw after execution")
+      }
+      return commandResult()
+    }
+
+    const chmodMatch = command.match(/^chmod ([0-7]{3,4})(?: --)? (\S+)$/)
     if (chmodMatch) {
       await chmod(this.localRemotePath(chmodMatch[2]), Number.parseInt(chmodMatch[1], 8))
       return commandResult()
     }
 
-    const moveMatch = command.match(/^mv -f (\S+) (\S+)$/)
+    const moveMatch = command.match(/^mv -f(T)?(?: --)? (\S+) (\S+)$/)
     if (moveMatch) {
-      await rename(this.localRemotePath(moveMatch[1]), this.localRemotePath(moveMatch[2]))
+      if (this.beforeNextMove) {
+        const beforeMove = this.beforeNextMove
+        this.beforeNextMove = undefined
+        await beforeMove()
+      }
+      this.moveCount++
+      const noTargetDirectory = moveMatch[1] === "T"
+      const sourcePath = this.localRemotePath(moveMatch[2])
+      const destinationPath = this.localRemotePath(moveMatch[3])
+      const destinationInfo = await stat(destinationPath).catch(() => undefined)
+      if (destinationInfo?.isDirectory()) {
+        if (noTargetDirectory) {
+          return commandResult("", "mv: cannot overwrite directory target\n", 1)
+        }
+        await rename(sourcePath, path.join(destinationPath, path.basename(sourcePath)))
+      } else {
+        await rename(sourcePath, destinationPath)
+      }
+      if (this.moveCount === this.throwAfterMoveNumber) {
+        throw new Error("injected uncertain rename")
+      }
       return commandResult()
     }
 
-    const removeMatch = command.match(/^rm -f (\S+)$/)
+    const removeMatch = command.match(/^rm -f(?: --)? (\S+)$/)
     if (removeMatch) {
+      if (this.failNextTempCleanup && removeMatch[1].includes(".opencode-")) {
+        this.failNextTempCleanup = false
+        return commandResult("", "injected temp cleanup failure\n", 1)
+      }
       await unlink(this.localRemotePath(removeMatch[1])).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error
       })
@@ -781,6 +1697,29 @@ class FakeRemotePool implements SSHPool {
     await mkdir(path.dirname(localPath), { recursive: true })
     await writeFile(localPath, content)
     if (mode !== undefined) await chmod(localPath, mode)
+  }
+
+  async chmodRemote(remotePath: string, mode: number): Promise<void> {
+    await chmod(this.localRemotePath(remotePath), mode)
+  }
+
+  async mkdirRemote(remotePath: string): Promise<void> {
+    await mkdir(this.localRemotePath(remotePath), { recursive: true })
+  }
+
+  async removeRemote(remotePath: string): Promise<void> {
+    await rm(this.localRemotePath(remotePath), { recursive: true, force: true })
+  }
+
+  async symlinkRemote(linkPath: string, targetPath: string): Promise<void> {
+    const localLink = this.localRemotePath(linkPath)
+    await mkdir(path.dirname(localLink), { recursive: true })
+    await symlink(this.localRemotePath(targetPath), localLink)
+  }
+
+  async replaceSymlinkRemote(linkPath: string, targetPath: string): Promise<void> {
+    await unlink(this.localRemotePath(linkPath))
+    await this.symlinkRemote(linkPath, targetPath)
   }
 
   readRemote(remotePath: string): Promise<string> {
@@ -839,14 +1778,18 @@ function config(mirrorRoot: string): RemoteConfig {
   }
 }
 
-function toolContext(ask: ToolContext["ask"] = async () => {}): ToolContext {
+function toolContext(
+  ask: ToolContext["ask"] = async () => {},
+  sessionID = "session",
+  abort = new AbortController().signal
+): ToolContext {
   return {
-    sessionID: "session",
-    messageID: "message",
+    sessionID,
+    messageID: `${sessionID}-message`,
     agent: "build",
     directory: "/workspace",
     worktree: "/workspace",
-    abort: new AbortController().signal,
+    abort,
     metadata: () => {},
     ask,
   }
@@ -877,6 +1820,35 @@ function throwIfAborted(signal?: AbortSignal): void {
 function remoteLockPath(remotePath: string): string {
   const hash = createHash("sha256").update(remotePath, "utf8").digest("hex")
   return path.posix.join(path.posix.dirname(remotePath), `.opencode-lock-${hash}`)
+}
+
+async function listLocalSyncArtifacts(root: string): Promise<string[]> {
+  const artifacts: string[] = []
+
+  async function visit(directory: string): Promise<void> {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name)
+      if (
+        entry.name.startsWith(".pull-") ||
+        entry.name.startsWith(".upload-") ||
+        entry.name.startsWith(".validate-")
+      ) {
+        artifacts.push(path.relative(root, entryPath))
+      }
+      if (entry.isDirectory()) await visit(entryPath)
+    }
+  }
+
+  await visit(root)
+  return artifacts.sort()
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
 }
 
 interface SftpFixture {
@@ -921,4 +1893,41 @@ async function waitForFile(filePath: string): Promise<void> {
 
 async function countLogLines(logPath: string): Promise<number> {
   return (await readFile(logPath, "utf8")).trim().split("\n").filter(Boolean).length
+}
+
+async function waitForCommand(pool: FakeRemotePool, command: string): Promise<void> {
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    if (pool.commands.includes(command)) return
+    await delay(10)
+  }
+  throw new Error(`Timed out waiting for remote command: ${command}`)
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+function flattenErrorMessages(error: unknown): string {
+  const messages: string[] = []
+  const seen = new Set<unknown>()
+  const visit = (value: unknown): void => {
+    if (seen.has(value)) return
+    seen.add(value)
+    if (value instanceof Error) {
+      messages.push(value.message)
+      if (value instanceof AggregateError) {
+        for (const nested of value.errors) visit(nested)
+      }
+      visit(value.cause)
+    } else if (value !== undefined) {
+      messages.push(String(value))
+    }
+  }
+  visit(error)
+  return messages.join("\n")
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }

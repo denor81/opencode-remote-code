@@ -412,7 +412,8 @@ export function createEditTool(
         throw new Error("No changes to apply: oldString and newString are identical.")
       }
 
-      const remotePath = await pathResolver.resolveMutation(args.filePath, ctx)
+      const mutationPath = await pathResolver.resolveMutation(args.filePath, ctx)
+      const remotePath = mutationPath.remotePath
 
       const localPath = pathMapper.toLocal(remotePath)
 
@@ -442,7 +443,7 @@ export function createEditTool(
         await ctx.ask({
           permission: "edit",
           patterns: [remotePermissionPattern(pathMapper.remoteRoot, remotePath)],
-          always: [remotePermissionPattern(pathMapper.remoteRoot, remotePath)],
+          always: [],
           metadata: { diff: diffPreview, executor: "ssh", remotePath },
         })
 
@@ -462,7 +463,7 @@ export function createEditTool(
             deletions: stats.deletions,
           },
         }
-      })
+      }, ctx.abort, [mutationPath])
     },
   })
 }

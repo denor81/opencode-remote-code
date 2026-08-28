@@ -6,16 +6,44 @@ import {
 } from "@opencode-ai/plugin"
 import { publishToolMetadata } from "../opencode-metadata.js"
 import type { RemotePathResolver } from "../remote-path-resolver.js"
+import type {
+  BashExecutionAdmission,
+  IdentityAttemptToken,
+  ProjectAdmissionToken,
+} from "../session-safety.js"
 import type { SSHPool } from "../ssh-pool.js"
-import { SshClientError } from "../ssh/client.js"
+import { SshClientError, type RemoteCommandResult } from "../ssh/client.js"
 
 const MAX_METADATA_LENGTH = 30_000
 const METADATA_UPDATE_INTERVAL_MS = 100
 
+export interface BashSafety {
+  beforeBash(
+    context: Pick<ToolContext, "sessionID" | "agent">,
+    command: string,
+    workdir?: string
+  ): BashExecutionAdmission
+  completeIdentity(
+    sessionID: string,
+    attempt: IdentityAttemptToken,
+    result: RemoteCommandResult
+  ): void
+  revalidateProject(
+    sessionID: string,
+    admission: ProjectAdmissionToken
+  ): void
+  projectSignal(
+    sessionID: string,
+    admission: ProjectAdmissionToken
+  ): AbortSignal
+  releaseProject(sessionID: string, admission: ProjectAdmissionToken): void
+}
+
 export function createBashTool(
   sshPool: SSHPool,
   defaultWorkdir: string,
-  pathResolver: RemotePathResolver
+  pathResolver: RemotePathResolver,
+  safety: BashSafety
 ): ToolDefinition {
   return tool({
     description: `Execute commands in a one-shot POSIX shell on the remote machine.`,
@@ -26,143 +54,200 @@ export function createBashTool(
       workdir: tool.schema.string().optional().describe("Working directory on the remote machine (optional)"),
     },
     async execute(args, ctx) {
-      const timeout = args.timeout ?? 120_000
-      if (timeout < 0) {
-        throw new Error("Timeout must be a non-negative number")
-      }
-      const workdir = await pathResolver.resolveExisting(
-        args.workdir ?? defaultWorkdir,
-        ctx
-      )
-      await ctx.ask({
-        permission: "bash",
-        patterns: [args.command],
-        always: [args.command],
-        metadata: {
-          description: args.description,
-          executor: "ssh",
-          workdir,
-        },
-      })
-      const title = args.description || "bash"
-      const stdoutDecoder = new StringDecoder("utf8")
-      const stderrDecoder = new StringDecoder("utf8")
-      const publisher = new MetadataPublisher(ctx)
-      let preview = ""
-      let previewWasCut = false
-      let decodersFinished = false
-      const appendPreview = (text: string) => {
-        preview += text
-        if (preview.length > MAX_METADATA_LENGTH) {
-          preview = "...\n\n" + preview.slice(-MAX_METADATA_LENGTH)
-          previewWasCut = true
-        }
-      }
-      const runningUpdate = (): MetadataUpdate => ({
-        title,
-        metadata: {
-          output: preview,
-          description: args.description,
-          executor: "ssh",
-          workdir,
-          truncated: previewWasCut,
-          remoteOutputTruncated: previewWasCut,
-        },
-      })
-      const finishPreview = () => {
-        if (decodersFinished) return
-        decodersFinished = true
-        appendPreview(stdoutDecoder.end())
-        appendPreview(stderrDecoder.end())
-      }
-      const settlementMetadata = (result?: {
-        exitCode: number | null
-        stderr: string
-        stdoutTruncated: boolean
-        stderrTruncated: boolean
-      }) => {
-        const stderr = result === undefined ? "" : filterSshNoise(result.stderr || "")
-        const remoteOutputTruncated =
-          previewWasCut ||
-          (result?.stdoutTruncated ?? false) ||
-          (result?.stderrTruncated ?? false)
-        return {
-          output: preview || "(no output)",
-          ...(result?.exitCode != null ? { exit: result.exitCode } : {}),
-          description: args.description,
-          stderr: stderr || undefined,
-          executor: "ssh",
-          workdir,
-          truncated: remoteOutputTruncated,
-          remoteOutputTruncated,
-        }
-      }
-
-      await publisher.publishInitial(runningUpdate())
-      let result
+      const sessionID = ctx.sessionID
+      const admission = safety.beforeBash(ctx, args.command, args.workdir)
       try {
-        result = await sshPool.exec(args.command, {
-          cwd: workdir,
-          timeout,
-          signal: ctx.abort,
-          onStdout: (chunk) => {
-            appendPreview(stdoutDecoder.write(chunk))
-            publisher.notify(runningUpdate())
-          },
-          onStderr: (chunk) => {
-            appendPreview(stderrDecoder.write(chunk))
-            publisher.notify(runningUpdate())
-          },
-        })
-      } catch (error) {
-        finishPreview()
-        const errorResult =
-          error instanceof SshClientError ? error.result : undefined
-        await publisher.settle({
-          title,
-          metadata: settlementMetadata(errorResult),
-        })
-        throw error
-      }
-
-      let stdout = result.stdout || ""
-      let stderr = result.stderr || ""
-
-      // Filter out SSH connection noise from stderr
-      stderr = filterSshNoise(stderr)
-
-      finishPreview()
-      const finalMetadata = settlementMetadata(result)
-      await publisher.settle({ title, metadata: finalMetadata })
-
-      if (result.exitCode !== 0) {
-        const parts: string[] = []
-        if (stdout.trim()) parts.push(stdout)
-        if (stderr.trim()) parts.push(`stderr:\n${stderr}`)
-        const message = parts.length > 0 ? parts.join("\n\n") : "(no output)"
-        throw new Error(
-          `Command failed with exit code ${result.exitCode}:\n${args.command}\n\n${message}`
+        const executionContext =
+          admission.kind === "project"
+            ? projectContext(ctx, safety, sessionID, admission.admission)
+            : ctx
+        const timeout = args.timeout ?? 120_000
+        if (timeout < 0) {
+          throw new Error("Timeout must be a non-negative number")
+        }
+        const workdir = await pathResolver.resolveExisting(
+          args.workdir ?? defaultWorkdir,
+          executionContext
         )
-      }
+        await executionContext.ask({
+          permission: "bash",
+          patterns: [args.command],
+          always: [],
+          metadata: {
+            description: args.description,
+            executor: "ssh",
+            workdir,
+          },
+        })
+        const title = args.description || "bash"
+        const stdoutDecoder = new StringDecoder("utf8")
+        const stderrDecoder = new StringDecoder("utf8")
+        const publisher = new MetadataPublisher(ctx)
+        let preview = ""
+        let previewWasCut = false
+        let decodersFinished = false
+        const appendPreview = (text: string) => {
+          preview += text
+          if (preview.length > MAX_METADATA_LENGTH) {
+            preview = "...\n\n" + preview.slice(-MAX_METADATA_LENGTH)
+            previewWasCut = true
+          }
+        }
+        const runningUpdate = (): MetadataUpdate => ({
+          title,
+          metadata: {
+            output: preview,
+            description: args.description,
+            executor: "ssh",
+            workdir,
+            truncated: previewWasCut,
+            remoteOutputTruncated: previewWasCut,
+          },
+        })
+        const finishPreview = () => {
+          if (decodersFinished) return
+          decodersFinished = true
+          appendPreview(stdoutDecoder.end())
+          appendPreview(stderrDecoder.end())
+        }
+        const settlementMetadata = (result?: {
+          exitCode: number | null
+          stderr: string
+          stdoutTruncated: boolean
+          stderrTruncated: boolean
+        }) => {
+          const stderr =
+            result === undefined ? "" : filterSshNoise(result.stderr || "")
+          const remoteOutputTruncated =
+            previewWasCut ||
+            (result?.stdoutTruncated ?? false) ||
+            (result?.stderrTruncated ?? false)
+          return {
+            output: preview || "(no output)",
+            ...(result?.exitCode != null ? { exit: result.exitCode } : {}),
+            description: args.description,
+            stderr: stderr || undefined,
+            executor: "ssh",
+            workdir,
+            truncated: remoteOutputTruncated,
+            remoteOutputTruncated,
+          }
+        }
 
-      let output = stdout
-      if (stderr.trim()) {
-        output += "\n\nstderr:\n" + stderr
-      }
-      if (!output.trim()) {
-        output = "(no output)"
-      }
-      if (result.stdoutTruncated || result.stderrTruncated) {
-        output += "\n\n(Output truncated by opencode-ssh.)"
-      }
+        await publisher.publishInitial(runningUpdate())
+        if (admission.kind === "project") {
+          safety.revalidateProject(sessionID, admission.admission)
+        }
+        let result
+        try {
+          result = await sshPool.exec(args.command, {
+            cwd: workdir,
+            timeout,
+            signal: executionContext.abort,
+            onStdout: (chunk) => {
+              appendPreview(stdoutDecoder.write(chunk))
+              publisher.notify(runningUpdate())
+            },
+            onStderr: (chunk) => {
+              appendPreview(stderrDecoder.write(chunk))
+              publisher.notify(runningUpdate())
+            },
+          })
+        } catch (error) {
+          finishPreview()
+          const errorResult =
+            error instanceof SshClientError ? error.result : undefined
+          await publisher.settle({
+            title,
+            metadata: settlementMetadata(errorResult),
+          })
+          throw error
+        }
 
-      return {
-        title,
-        output,
-        metadata: finalMetadata,
+        let stdout = result.stdout || ""
+        let stderr = result.stderr || ""
+
+        // Filter out SSH connection noise from stderr
+        stderr = filterSshNoise(stderr)
+
+        finishPreview()
+        const finalMetadata = settlementMetadata(result)
+        await publisher.settle({ title, metadata: finalMetadata })
+
+        if (admission.kind === "identity") {
+          throwIfAborted(ctx.abort, "identity preflight")
+          safety.completeIdentity(sessionID, admission.attempt, result)
+        }
+
+        if (result.exitCode !== 0) {
+          const parts: string[] = []
+          if (stdout.trim()) parts.push(stdout)
+          if (stderr.trim()) parts.push(`stderr:\n${stderr}`)
+          const message = parts.length > 0 ? parts.join("\n\n") : "(no output)"
+          throw new Error(
+            `Command failed with exit code ${result.exitCode}:\n${args.command}\n\n${message}`
+          )
+        }
+
+        let output = stdout
+        if (stderr.trim()) {
+          output += "\n\nstderr:\n" + stderr
+        }
+        if (!output.trim()) {
+          output = "(no output)"
+        }
+        if (result.stdoutTruncated || result.stderrTruncated) {
+          output += "\n\n(Output truncated by opencode-ssh.)"
+        }
+
+        return {
+          title,
+          output,
+          metadata: finalMetadata,
+        }
+      } finally {
+        if (admission.kind === "project") {
+          safety.releaseProject(sessionID, admission.admission)
+        }
       }
     },
   })
+}
+
+function throwIfAborted(signal: AbortSignal, activity: string): void {
+  if (!signal.aborted) return
+  if (signal.reason instanceof Error) throw signal.reason
+  const error = new Error(`OpenCode SSH ${activity} was aborted before completion`)
+  error.name = "AbortError"
+  throw error
+}
+
+function projectContext(
+  context: ToolContext,
+  safety: BashSafety,
+  sessionID: string,
+  admission: ProjectAdmissionToken
+): ToolContext {
+  const abort = combineAbortSignals(
+    context.abort,
+    safety.projectSignal(sessionID, admission)
+  )
+  const ask: ToolContext["ask"] = async (input) => {
+    await context.ask.call(context, input)
+    safety.revalidateProject(sessionID, admission)
+  }
+  return new Proxy(context, {
+    get(target, property, receiver) {
+      if (property === "ask") return ask
+      if (property === "abort") return abort
+      return Reflect.get(target, property, receiver)
+    },
+  })
+}
+
+function combineAbortSignals(original: AbortSignal, lease: AbortSignal): AbortSignal {
+  if (original === lease) return original
+  return AbortSignal.any([original, lease])
 }
 
 type MetadataUpdate = Parameters<ToolContext["metadata"]>[0]

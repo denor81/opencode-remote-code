@@ -27,6 +27,8 @@ describe("PathMapper", () => {
     expect(inside).not.toBe(outside)
     expect(mapper.toRemote(inside)).toBe("/srv/app/etc/hosts")
     expect(mapper.toRemote(outside)).toBe("/etc/hosts")
+    expect(mapper.toLocalRelative("/srv/app/etc/hosts")).toBe("workspace/etc/hosts")
+    expect(mapper.toLocalRelative("/etc/hosts")).toBe("external/etc/hosts")
   })
 
   it("maps workspace and filesystem roots without ambiguity", () => {

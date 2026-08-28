@@ -5,6 +5,8 @@ import {
   printParseErrorCode,
   type ParseError,
 } from "jsonc-parser"
+import { isOpenCodeVersion } from "./opencode-runtime-version.js"
+import type { TaskResumeCapability } from "./task-resume-capability.js"
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/
 const LAUNCH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -82,9 +84,16 @@ export function mergeOpenCodeConfigContent(
   content: string | undefined,
   pluginFileURL: string | URL,
   launchID: string,
-  safetyInstructionsPath: string
+  safetyInstructionsPath: string,
+  expectedOpenCodeRuntimeVersion: string,
+  taskResumeCapability?: TaskResumeCapability
 ): string {
   validateLaunchID(launchID)
+  if (!isOpenCodeVersion(expectedOpenCodeRuntimeVersion)) {
+    throw new LauncherConfigError(
+      "Expected OpenCode runtime version must be a plain semantic version"
+    )
+  }
 
   const fileURL = pluginFileURL instanceof URL ? pluginFileURL.href : pluginFileURL
   let parsedURL: URL
@@ -132,6 +141,11 @@ export function mergeOpenCodeConfigContent(
   }
 
   const instructions = (existingInstructions ?? []) as string[]
+  const pluginOptions = {
+    launchID,
+    expectedOpenCodeRuntimeVersion,
+    ...(taskResumeCapability === undefined ? {} : { taskResumeCapability }),
+  }
 
   const merged = {
     ...config,
@@ -140,7 +154,7 @@ export function mergeOpenCodeConfigContent(
       : [...instructions, safetyInstructionsPath],
     plugin: [
       ...(existingPlugins ?? []),
-      [fileURL, { launchID }],
+      [fileURL, pluginOptions],
     ],
   }
   return `${JSON.stringify(merged, null, 2)}\n`

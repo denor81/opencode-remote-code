@@ -3,6 +3,7 @@ import { open, rename, rm, unlink } from "node:fs/promises"
 import path from "node:path"
 
 export const READY_PROTOCOL = "opencode-ssh-ready-v1" as const
+export const READY_STABILITY_INTERVAL_MS = 25
 const MAX_READY_FILE_BYTES = 16 * 1024
 const READY_RECORD_KEYS = [
   "alias",
@@ -33,6 +34,11 @@ export interface ReadyRecord {
 export interface WaitForReadyOptions {
   timeoutMs?: number
   pollIntervalMs?: number
+  signal?: AbortSignal
+}
+
+export interface ConfirmReadyStabilityOptions {
+  intervalMs?: number
   signal?: AbortSignal
 }
 
@@ -270,6 +276,37 @@ export async function waitForReadyHandshake(
     }
     await delay(Math.min(pollIntervalMs, remaining), options.signal)
   }
+}
+
+/** Re-read and validate readiness after the launch stability interval. */
+export async function confirmReadyHandshakeStability(
+  readyPath: string,
+  expected: ReadyHandshakeIdentity,
+  options: ConfirmReadyStabilityOptions = {}
+): Promise<ReadyRecord> {
+  assertIdentity(expected)
+  const intervalMs = options.intervalMs ?? READY_STABILITY_INTERVAL_MS
+  if (!Number.isFinite(intervalMs) || intervalMs < 0) {
+    throw new RangeError(
+      "Ready handshake stability interval must be a non-negative finite number"
+    )
+  }
+
+  await delay(intervalMs, options.signal)
+  throwIfAborted(options.signal)
+  let value: unknown
+  try {
+    value = await readReadyRecord(readyPath)
+  } catch (error) {
+    if (errnoIs(error, "ENOENT")) {
+      throw new ReadyHandshakeValidationError(
+        "Ready handshake disappeared during the startup stability interval"
+      )
+    }
+    throw error
+  }
+  throwIfAborted(options.signal)
+  return validateReadyRecord(value, expected)
 }
 
 export async function removeReadyFile(readyPath: string): Promise<void> {

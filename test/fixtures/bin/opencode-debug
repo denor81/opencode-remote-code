@@ -1,10 +1,36 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process"
-import { appendFileSync, existsSync, mkdirSync } from "node:fs"
+import { createHash } from "node:crypto"
+import {
+  accessSync,
+  appendFileSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  realpathSync,
+  renameSync,
+  watch,
+  writeFileSync,
+} from "node:fs"
+import { createServer } from "node:net"
+import path from "node:path"
+
+const MAX_FAILURE_DIAGNOSTIC_BYTES = 4_096
+const AUTO_EXIT_ACTIVATION_TIMEOUT_MS = 25_000
+const AUTO_EXIT_DISPOSAL_TIMEOUT_MS = 15_000
+const AUTO_EXIT_DISPOSAL_SETTLE_MS = 75
+const AUTO_EXIT_READY_TIMEOUT_MS = 45_000
+// Exceeds the launcher's 25 ms stability re-read without adding a long blind delay.
+const AUTO_EXIT_READY_STABILITY_MS = 75
+const AUTO_EXIT_KILL_GRACE_MS = 2_000
+const failureDiagnosticName = ".opencode-debug-failure.json"
+const childProvenanceName = ".opencode-debug-child.json"
+const childCommand = process.env.FAKE_OPENCODE_REAL_BIN ?? "opencode"
+const childExecutable = resolveExecutable(childCommand)
 
 if (process.argv.length === 3 && process.argv[2] === "--version") {
-  const result = await runChild(process.env.FAKE_OPENCODE_REAL_BIN ?? "opencode", ["--version"], {
+  const result = await runChild(childExecutable, ["--version"], {
     env: process.env,
     shell: false,
     stdio: ["ignore", "inherit", "inherit"],
@@ -14,7 +40,23 @@ if (process.argv.length === 3 && process.argv[2] === "--version") {
   process.exit(result.status ?? 1)
 }
 
-const childArgv = ["debug", "config"]
+const serveMode =
+  process.argv.length === 2 && process.env.FAKE_OPENCODE_SERVE === "1"
+const autoExitAfterReady =
+  serveMode && process.env.FAKE_OPENCODE_SERVE_AUTO_EXIT_AFTER_READY === "1"
+if (
+  process.env.FAKE_OPENCODE_SERVE_AUTO_EXIT_AFTER_READY === "1" &&
+  !serveMode
+) {
+  throw new Error("OpenCode debug wrapper auto-exit requires serve mode")
+}
+const autoExitStatePath = autoExitAfterReady
+  ? requiredEnvironment("FAKE_OPENCODE_SERVE_AUTO_EXIT_STATE")
+  : undefined
+const servePort = serveMode ? await allocateFreeLoopbackPort() : undefined
+const childArgv = serveMode
+  ? ["serve", "--hostname=127.0.0.1", `--port=${servePort}`]
+  : ["debug", "config"]
 const isolatedDirectoryNames = [
   "HOME",
   "XDG_CONFIG_HOME",
@@ -46,6 +88,7 @@ const childEnvironmentNames = [
   "OPENCODE_CONFIG_DIR",
   "OPENCODE_CONFIG_CONTENT",
   "OPENCODE_DISABLE_AUTOUPDATE",
+  "OPENCODE_DISABLE_AUTOCOMPACT",
   "OPENCODE_DISABLE_CLAUDE_CODE",
   "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
   "OPENCODE_DISABLE_DEFAULT_PLUGINS",
@@ -55,6 +98,10 @@ const childEnvironmentNames = [
   "OPENCODE_DISABLE_PROJECT_CONFIG",
   "OPENCODE_DISABLE_PRUNE",
   "OPENCODE_DISABLE_SHARE",
+  "OPENCODE_DISABLE_TERMINAL_TITLE",
+  "OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER",
+  "OPENCODE_CLIENT",
+  "OPENCODE_DB",
   "OPENCODE_SSH_ALIAS",
   "OPENCODE_SSH_WORKDIR",
   "OPENCODE_SSH_SOCKET",
@@ -66,6 +113,10 @@ const childEnvironmentNames = [
   "OPENCODE_SSH_MIRROR_ROOT",
   "OPENCODE_SSH_SSH_BIN",
   "OPENCODE_SSH_SFTP_BIN",
+  "OPENCODE_SSH_EXPECTED_OPENCODE_RUNTIME_VERSION",
+  "OPENCODE_SSH_TASK_RESUME_CAPABILITY",
+  "OPENCODE_SSH_LOG_DIRECTORY",
+  "OPENCODE_SSH_LOG_STARTUP_ID",
   "OPENCODE_SSH_PROBE_TOKEN",
   "OPENCODE_SSH_PROBE_RESULT",
   "FAKE_SSH_LOG",
@@ -74,12 +125,16 @@ const childEnvironmentNames = [
   "FAKE_SSH_STDOUT",
   "FAKE_SSH_STDERR",
   "FAKE_SSH_EXIT_CODE",
+  "FAKE_SSH_RESPONSES",
+  "FAKE_SSH_FAIL_UNMATCHED",
+  "FAKE_SSH_REQUIRE_LIVE_MASTER",
   "FAKE_SFTP_LOG",
   "FAKE_SFTP_INPUT",
   "FAKE_SFTP_INPUT_LOG",
   "FAKE_SFTP_STDOUT",
   "FAKE_SFTP_STDERR",
   "FAKE_SFTP_EXIT_CODE",
+  "FAKE_REMOTE_ROOT",
 ]
 const selectedLauncherEnvironmentNames = [
   "OPENCODE_SSH_ALIAS",
@@ -92,29 +147,87 @@ const selectedLauncherEnvironmentNames = [
   "OPENCODE_SSH_MIRROR_ROOT",
   "OPENCODE_SSH_SSH_BIN",
   "OPENCODE_SSH_SFTP_BIN",
+  "OPENCODE_SSH_EXPECTED_OPENCODE_RUNTIME_VERSION",
+  "OPENCODE_SSH_TASK_RESUME_CAPABILITY",
 ]
 
 for (const name of isolatedDirectoryNames) {
   mkdirSync(requiredEnvironment(name), { recursive: true, mode: 0o700 })
 }
 
+const forwardedChildEnvironmentNames = [
+  ...childEnvironmentNames,
+  ...(!serveMode
+    ? Object.keys(process.env).filter(isNpmTransportEnvironment)
+    : []),
+]
 const childEnvironment = Object.fromEntries(
-  childEnvironmentNames.flatMap((name) => {
+  [...new Set(forwardedChildEnvironmentNames)].flatMap((name) => {
     const value = process.env[name]
     return value === undefined ? [] : [[name, value]]
   })
 )
-const result = await runChild(process.env.FAKE_OPENCODE_REAL_BIN ?? "opencode", childArgv, {
+if (serveMode) {
+  const statePath = requiredEnvironment("FAKE_OPENCODE_SERVE_STATE")
+  writeFileSync(
+    statePath,
+    `${JSON.stringify({
+      argv: process.argv.slice(2),
+      childArgv,
+      childExecutable,
+      servePort,
+      ...(autoExitAfterReady ? { autoExitAfterReady: true } : {}),
+      cwd: process.cwd(),
+      env: Object.fromEntries(
+        [...selectedLauncherEnvironmentNames, "OPENCODE_SSH_READY_NONCE"].map(
+          (name) => [name, process.env[name]]
+        )
+      ),
+    })}\n`,
+    { encoding: "utf8", flag: "wx", mode: 0o600 }
+  )
+}
+writeChildProvenance()
+const result = await runChild(childExecutable, childArgv, {
   cwd: process.cwd(),
   env: childEnvironment,
   shell: false,
-  stdio: ["ignore", "ignore", "inherit"],
+  stdio: [
+    "ignore",
+    serveMode && !autoExitAfterReady ? "inherit" : autoExitAfterReady ? "pipe" : "ignore",
+    serveMode && !autoExitAfterReady ? "inherit" : "pipe",
+  ],
+  captureStderrBytes:
+    serveMode && !autoExitAfterReady ? 0 : MAX_FAILURE_DIAGNOSTIC_BYTES,
+  autoExitAfterReady: autoExitAfterReady
+    ? {
+        readyPath: requiredEnvironment("OPENCODE_SSH_READY_PATH"),
+        statePath: autoExitStatePath,
+        nonce: requiredEnvironment("OPENCODE_SSH_READY_NONCE"),
+        directory: process.cwd(),
+        port: servePort,
+        timeoutMs: AUTO_EXIT_READY_TIMEOUT_MS,
+        stabilityMs: AUTO_EXIT_READY_STABILITY_MS,
+      }
+    : undefined,
 })
+
+if (
+  (autoExitAfterReady && !result.intentionalPostReadyTermination) ||
+  (!serveMode &&
+    (result.error ||
+      (result.status !== null && result.status !== 0) ||
+      (result.signal && result.signal !== "SIGTERM" && result.signal !== "SIGINT")))
+) {
+  writeFailureDiagnostic(result)
+}
 
 const readyPath = process.env.OPENCODE_SSH_READY_PATH
 const invocation = {
   argv: process.argv.slice(2),
   childArgv,
+  childExecutable,
+  ...(serveMode ? { servePort } : {}),
   cwd: process.cwd(),
   configContent: process.env.OPENCODE_CONFIG_CONTENT,
   env: Object.fromEntries(
@@ -122,6 +235,22 @@ const invocation = {
   ),
   wrapperEnvironmentNames: Object.keys(process.env).sort(),
   childEnvironmentNames: Object.keys(childEnvironment).sort(),
+  ...(autoExitAfterReady
+    ? {
+        readyObservedBeforeTermination: result.readyObservedBeforeTermination,
+        readyStableBeforeTermination: result.readyStableBeforeTermination,
+        activationDispatched: result.activationDispatched,
+        activationSucceeded: result.activationSucceeded,
+        activationURL: result.activationURL,
+        activationError: result.activationError,
+        disposalDispatched: result.disposalDispatched,
+        disposalSucceeded: result.disposalSucceeded,
+        disposalURL: result.disposalURL,
+        disposalError: result.disposalError,
+        intentionalPostReadyTermination: result.intentionalPostReadyTermination,
+        controlError: result.controlError?.message,
+      }
+    : {}),
   readyExistsAfterChild: readyPath ? existsSync(readyPath) : false,
   exitCode: result.status,
   signal: result.signal,
@@ -133,8 +262,16 @@ if (result.error) {
   process.stderr.write(`opencode-debug: ${result.error.message}\n`)
 }
 
-const delayMs = configuredDelay()
-if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+if (!autoExitAfterReady) {
+  const delayMs = configuredDelay()
+  if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+}
+
+if (autoExitAfterReady) {
+  if (result.intentionalPostReadyTermination) process.exit(0)
+  if (result.signal) process.kill(process.pid, result.signal)
+  process.exit(result.status !== null && result.status !== 0 ? result.status : 1)
+}
 
 if (result.signal) {
   process.kill(process.pid, result.signal)
@@ -144,6 +281,44 @@ process.exit(result.status ?? 1)
 function requiredEnvironment(name) {
   const value = process.env[name]
   if (!value) throw new Error(`OpenCode debug wrapper requires ${name}`)
+  return value
+}
+
+async function allocateFreeLoopbackPort() {
+  const server = createServer()
+  try {
+    await new Promise((resolve, reject) => {
+      const onError = (error) => reject(error)
+      server.once("error", onError)
+      server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+        server.removeListener("error", onError)
+        resolve()
+      })
+    })
+    const address = server.address()
+    if (
+      address === null ||
+      typeof address === "string" ||
+      address.address !== "127.0.0.1"
+    ) {
+      throw new Error("OpenCode debug wrapper received an invalid loopback address")
+    }
+    return validateTCPPort(address.port, "allocated OpenCode serve port")
+  } finally {
+    if (server.listening) {
+      // This trusted local fixture must release its reservation before OpenCode
+      // binds, leaving an unavoidable close-to-bind race with local processes.
+      await new Promise((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()))
+      })
+    }
+  }
+}
+
+function validateTCPPort(value, description) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 65_535) {
+    throw new Error(`${description} must be a positive TCP port integer`)
+  }
   return value
 }
 
@@ -157,13 +332,144 @@ function configuredDelay() {
   return parsed
 }
 
+function writeFailureDiagnostic(result) {
+  const configDirectory = process.env.OPENCODE_CONFIG_DIR
+  if (!configDirectory) return
+  const stderr = redactSecrets(result.stderr ?? "")
+  try {
+    writeFileSync(
+      path.join(configDirectory, failureDiagnosticName),
+      `${JSON.stringify({
+        childArgv,
+        exitCode: result.status,
+        signal: result.signal,
+        error:
+          redactSecrets(
+            result.controlError?.message ?? result.error?.message ?? ""
+          ) || undefined,
+        activationError: result.activationError
+          ? redactSecrets(result.activationError)
+          : undefined,
+        disposalError: result.disposalError
+          ? redactSecrets(result.disposalError)
+          : undefined,
+        stderr,
+        stderrTruncated: result.stderrTruncated ?? false,
+      })}\n`,
+      { encoding: "utf8", mode: 0o600 }
+    )
+  } catch {
+    // Diagnostics must not change the wrapped child's result.
+  }
+}
+
+function writeChildProvenance() {
+  const configDirectory = requiredEnvironment("OPENCODE_CONFIG_DIR")
+  const replaceProbeProvenance =
+    serveMode && process.env.FAKE_OPENCODE_REPLACE_CHILD_PROVENANCE === "1"
+  const provenancePath = path.join(configDirectory, childProvenanceName)
+  const contents = `${JSON.stringify({
+    childArgv,
+    childExecutable,
+    ...(serveMode ? { servePort } : {}),
+  })}\n`
+  if (!replaceProbeProvenance) {
+    writeFileSync(provenancePath, contents, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    })
+    return
+  }
+
+  const temporaryPath = `${provenancePath}.${process.pid}.tmp`
+  writeFileSync(temporaryPath, contents, {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+  })
+  renameSync(temporaryPath, provenancePath)
+}
+
+function redactSecrets(input) {
+  let output = input
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!value || !/(?:TOKEN|KEY|SECRET|PASSWORD|AUTH)/i.test(name)) continue
+    output = output.replaceAll(value, "[redacted]")
+  }
+  const bytes = Buffer.from(output)
+  if (bytes.length <= MAX_FAILURE_DIAGNOSTIC_BYTES) return output
+  return bytes.subarray(-MAX_FAILURE_DIAGNOSTIC_BYTES).toString("utf8")
+}
+
+function isNpmTransportEnvironment(name) {
+  return (
+    /^npm_config_/i.test(name) ||
+    [
+      "BUN_CONFIG_REGISTRY",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "NODE_EXTRA_CA_CERTS",
+      "SSL_CERT_DIR",
+      "SSL_CERT_FILE",
+    ].includes(name.toUpperCase())
+  )
+}
+
+function resolveExecutable(command) {
+  const candidates = command.includes(path.sep)
+    ? [path.resolve(command)]
+    : (process.env.PATH ?? "")
+        .split(path.delimiter)
+        .filter(Boolean)
+        .map((directory) => path.resolve(directory, command))
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, constants.X_OK)
+      return realpathSync(candidate)
+    } catch {
+      // Try the next PATH entry.
+    }
+  }
+  return command
+}
+
 function runChild(command, args, options) {
   return new Promise((resolve) => {
+    const {
+      captureStderrBytes = 0,
+      autoExitAfterReady,
+      ...spawnOptions
+    } = options
     const useProcessGroup = process.platform !== "win32"
-    const child = spawn(command, args, { ...options, detached: useProcessGroup })
+    const child = spawn(command, args, { ...spawnOptions, detached: useProcessGroup })
     let settled = false
     let forceKillTimer
+    let autoExitKillTimer
+    let readyTimeout
+    let readyStabilityTimer
+    let readyWatcher
+    let activationController
+    let disposalController
+    let disposalSettleTimer
     let pendingResult
+    let stderr = ""
+    let stderrBytes = 0
+    let stderrTruncated = false
+    let readyObservedBeforeTermination = false
+    let readyStableBeforeTermination = false
+    let activationStarted = false
+    let activationSucceeded = false
+    let activationURL
+    let activationError
+    let disposalStarted = false
+    let disposalSucceeded = false
+    let disposalURL
+    let disposalError
+    let stdoutPreview = ""
+    let intentionalPostReadyTermination = false
+    let controlError
     const signalChild = (signal) => {
       if (!child.pid) return
       if (!useProcessGroup && child.exitCode !== null) return
@@ -191,6 +497,13 @@ function runChild(command, args, options) {
     )
     const cleanup = () => {
       if (forceKillTimer) clearTimeout(forceKillTimer)
+      if (autoExitKillTimer) clearTimeout(autoExitKillTimer)
+      if (readyTimeout) clearTimeout(readyTimeout)
+      if (readyStabilityTimer) clearTimeout(readyStabilityTimer)
+      if (disposalSettleTimer) clearTimeout(disposalSettleTimer)
+      readyWatcher?.close()
+      activationController?.abort()
+      disposalController?.abort()
       for (const [signal, handler] of signalHandlers) {
         process.removeListener(signal, handler)
       }
@@ -203,13 +516,275 @@ function runChild(command, args, options) {
       }
       settled = true
       cleanup()
-      resolve(result)
+      if (autoExitAfterReady && !intentionalPostReadyTermination && !controlError) {
+        controlError = new Error(
+          readyObservedBeforeTermination
+            ? "OpenCode serve child exited before ready stability confirmation"
+            : "OpenCode serve child exited before the ready marker was observed"
+        )
+      }
+      resolve({
+        ...result,
+        stderr,
+        stderrTruncated,
+        readyObservedBeforeTermination,
+        readyStableBeforeTermination,
+        activationDispatched: activationStarted,
+        activationSucceeded,
+        activationURL,
+        activationError,
+        disposalDispatched: disposalStarted,
+        disposalSucceeded,
+        disposalURL,
+        disposalError,
+        intentionalPostReadyTermination,
+        controlError,
+      })
     }
 
+    const scheduleAutoExitKill = () => {
+      if (autoExitKillTimer) return
+      autoExitKillTimer = setTimeout(() => {
+        autoExitKillTimer = undefined
+        signalChild("SIGKILL")
+      }, AUTO_EXIT_KILL_GRACE_MS)
+    }
+    const failAutoExit = (message, cause) => {
+      if (settled || intentionalPostReadyTermination || controlError) return
+      controlError = new Error(message, { cause })
+      signalChild("SIGTERM")
+      scheduleAutoExitKill()
+    }
+    const completeIntentionalTermination = () => {
+      if (
+        !autoExitAfterReady ||
+        settled ||
+        controlError ||
+        intentionalPostReadyTermination ||
+        !readyStableBeforeTermination ||
+        !activationSucceeded
+      ) {
+        return
+      }
+      if (!disposalStarted) {
+        if (!existsSync(autoExitAfterReady.readyPath)) {
+          failAutoExit(
+            "OpenCode ready marker disappeared before wrapper stability confirmation"
+          )
+          return
+        }
+        disposalStarted = true
+        const url = new URL("/instance/dispose", activationURL)
+        url.searchParams.set("directory", autoExitAfterReady.directory)
+        disposalURL = url.href
+        disposalController = new AbortController()
+        const signal = AbortSignal.any([
+          disposalController.signal,
+          AbortSignal.timeout(AUTO_EXIT_DISPOSAL_TIMEOUT_MS),
+        ])
+        void (async () => {
+          try {
+            const response = await fetch(url, {
+              headers: { accept: "application/json" },
+              method: "POST",
+              redirect: "error",
+              signal,
+            })
+            if (response.status !== 200) {
+              disposalError = `OpenCode instance disposal returned HTTP ${response.status}`
+              failAutoExit(disposalError)
+              return
+            }
+            await response.arrayBuffer()
+            disposalSucceeded = true
+            disposalSettleTimer = setTimeout(() => {
+              disposalSettleTimer = undefined
+              completeIntentionalTermination()
+            }, AUTO_EXIT_DISPOSAL_SETTLE_MS)
+          } catch (error) {
+            disposalError = error instanceof Error ? error.message : String(error)
+            failAutoExit("OpenCode instance disposal failed", error)
+          }
+        })()
+        return
+      }
+      if (!disposalSucceeded) {
+        return
+      }
+      try {
+        writeFileSync(
+          autoExitAfterReady.statePath,
+          `${JSON.stringify({
+            readyObservedBeforeTermination: true,
+            readyStableBeforeTermination: true,
+            readyPath: autoExitAfterReady.readyPath,
+            nonceHash: sha256(autoExitAfterReady.nonce),
+            stabilityMs: autoExitAfterReady.stabilityMs,
+            servePort: autoExitAfterReady.port,
+            activationDispatched: true,
+            activationSucceeded,
+            activationURL,
+            disposalDispatched: true,
+            disposalSucceeded,
+            disposalURL,
+          })}\n`,
+          { encoding: "utf8", flag: "wx", mode: 0o600 }
+        )
+      } catch (error) {
+        failAutoExit("OpenCode wrapper could not record ready observation", error)
+        return
+      }
+      intentionalPostReadyTermination = true
+      readyWatcher?.close()
+      readyWatcher = undefined
+      signalChild("SIGTERM")
+      scheduleAutoExitKill()
+    }
+    const confirmReadyStability = () => {
+      if (!autoExitAfterReady || settled || controlError) return
+      if (!existsSync(autoExitAfterReady.readyPath)) {
+        failAutoExit(
+          "OpenCode ready marker disappeared before wrapper stability confirmation"
+        )
+        return
+      }
+      readyStableBeforeTermination = true
+      completeIntentionalTermination()
+    }
+    const activateServeInstance = (baseURL) => {
+      if (!autoExitAfterReady || activationStarted || settled || controlError) return
+      let observedURL
+      let observedPort
+      try {
+        observedURL = new URL(baseURL)
+        observedPort = validateTCPPort(
+          Number(observedURL.port),
+          "observed OpenCode serve port"
+        )
+      } catch (error) {
+        failAutoExit("OpenCode serve reported an invalid listening URL", error)
+        return
+      }
+      if (
+        observedURL.hostname !== "127.0.0.1" ||
+        observedPort !== autoExitAfterReady.port
+      ) {
+        failAutoExit(
+          `OpenCode serve listened on unexpected URL ${JSON.stringify(baseURL)}`
+        )
+        return
+      }
+      activationStarted = true
+      const url = new URL("/path", observedURL)
+      url.searchParams.set("directory", autoExitAfterReady.directory)
+      activationURL = url.href
+      activationController = new AbortController()
+      const signal = AbortSignal.any([
+        activationController.signal,
+        AbortSignal.timeout(AUTO_EXIT_ACTIVATION_TIMEOUT_MS),
+      ])
+      void fetch(url, {
+        headers: { accept: "application/json" },
+        redirect: "error",
+        signal,
+      }).then(
+        (response) => {
+          if (response.status !== 200) {
+            activationError = `OpenCode serve activation returned HTTP ${response.status}`
+            failAutoExit(activationError)
+            return
+          }
+          activationSucceeded = true
+          completeIntentionalTermination()
+        },
+        (error) => {
+          activationError = error instanceof Error ? error.message : String(error)
+          failAutoExit("OpenCode serve activation failed", error)
+        }
+      )
+    }
+    const observeReady = () => {
+      if (
+        !autoExitAfterReady ||
+        settled ||
+        readyObservedBeforeTermination ||
+        !existsSync(autoExitAfterReady.readyPath)
+      ) {
+        return
+      }
+      readyObservedBeforeTermination = true
+      if (readyTimeout) {
+        clearTimeout(readyTimeout)
+        readyTimeout = undefined
+      }
+      readyStabilityTimer = setTimeout(
+        confirmReadyStability,
+        autoExitAfterReady.stabilityMs
+      )
+    }
+
+    if (child.stderr && captureStderrBytes > 0) {
+      child.stderr.on("data", (chunk) => {
+        process.stderr.write(chunk)
+        const value = Buffer.from(chunk)
+        stderrBytes += value.length
+        stderr += value.toString("utf8")
+        if (stderrBytes > captureStderrBytes) {
+          stderrTruncated = true
+          stderr = Buffer.from(stderr).subarray(-captureStderrBytes).toString("utf8")
+          stderrBytes = Buffer.byteLength(stderr)
+        }
+      })
+    }
+    if (child.stdout && autoExitAfterReady) {
+      child.stdout.on("data", (chunk) => {
+        process.stdout.write(chunk)
+        stdoutPreview += Buffer.from(chunk).toString("utf8")
+        if (stdoutPreview.length > MAX_FAILURE_DIAGNOSTIC_BYTES) {
+          stdoutPreview = stdoutPreview.slice(-MAX_FAILURE_DIAGNOSTIC_BYTES)
+        }
+        const match = /opencode server listening on (http:\/\/127\.0\.0\.1:\d+)/u.exec(
+          stdoutPreview
+        )
+        if (match) activateServeInstance(match[1])
+      })
+    }
     for (const [signal, handler] of signalHandlers) {
       process.on(signal, handler)
     }
     child.once("error", (error) => finish({ error, status: null, signal: null }))
     child.once("close", (status, signal) => finish({ status, signal }))
+    if (autoExitAfterReady) {
+      readyTimeout = setTimeout(
+        () =>
+          failAutoExit(
+            `Timed out after ${autoExitAfterReady.timeoutMs}ms waiting for the OpenCode ready marker`
+          ),
+        autoExitAfterReady.timeoutMs
+      )
+      try {
+        readyWatcher = watch(
+          path.dirname(autoExitAfterReady.readyPath),
+          (_event, filename) => {
+            if (
+              filename === null ||
+              filename.toString() === path.basename(autoExitAfterReady.readyPath)
+            ) {
+              observeReady()
+            }
+          }
+        )
+        readyWatcher.on("error", (error) => {
+          failAutoExit("OpenCode wrapper ready watcher failed", error)
+        })
+        observeReady()
+      } catch (error) {
+        failAutoExit("OpenCode wrapper could not watch the ready marker", error)
+      }
+    }
   })
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex")
 }

@@ -21,7 +21,8 @@ export function createWriteTool(
       filePath: tool.schema.string().describe("The absolute path to the file to write (must be absolute)"),
     },
     async execute(args, ctx) {
-      const remotePath = await pathResolver.resolveMutation(args.filePath, ctx)
+      const mutationPath = await pathResolver.resolveMutation(args.filePath, ctx)
+      const remotePath = mutationPath.remotePath
 
       const localPath = pathMapper.toLocal(remotePath)
       return syncEngine.transaction(async (transaction) => {
@@ -45,7 +46,7 @@ export function createWriteTool(
         await ctx.ask({
           permission: "edit",
           patterns: [remotePermissionPattern(pathMapper.remoteRoot, remotePath)],
-          always: [remotePermissionPattern(pathMapper.remoteRoot, remotePath)],
+          always: [],
           metadata: { diff: diffPreview, executor: "ssh", remotePath },
         })
 
@@ -62,7 +63,7 @@ export function createWriteTool(
             exists: existed,
           },
         }
-      })
+      }, ctx.abort, [mutationPath])
     },
   })
 }

@@ -1,6 +1,17 @@
 #!/usr/bin/env node
 
-import { appendFileSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
+import path from "node:path"
 
 const args = process.argv.slice(2)
 const logPath = process.env.FAKE_SSH_LOG
@@ -15,8 +26,10 @@ if (args.includes("-MN")) {
 
   const statePath = fakeStatePath(socketFromOption)
   let readyTimer
+  let exitMarkerTimer
   const cleanup = (exitCode = 0) => {
     if (readyTimer) clearTimeout(readyTimer)
+    if (exitMarkerTimer) clearInterval(exitMarkerTimer)
     removeOwnState(statePath)
     process.exit(exitCode)
   }
@@ -24,7 +37,8 @@ if (args.includes("-MN")) {
   process.once("SIGINT", () => cleanup(0))
 
   const configuredExit = numberFromEnv("FAKE_SSH_MASTER_EXIT_CODE")
-  if (configuredExit !== undefined) {
+  const exitMarker = process.env.FAKE_SSH_MASTER_EXIT_MARKER
+  if (configuredExit !== undefined && !exitMarker) {
     setTimeout(() => cleanup(configuredExit), numberFromEnv("FAKE_SSH_MASTER_EXIT_DELAY_MS") ?? 0)
   } else if (process.env.FAKE_SSH_NEVER_READY !== "1") {
     readyTimer = setTimeout(() => {
@@ -33,17 +47,23 @@ if (args.includes("-MN")) {
       renameSync(temporaryStatePath, statePath)
     }, numberFromEnv("FAKE_SSH_READY_DELAY_MS") ?? 0)
   }
+  if (exitMarker) {
+    exitMarkerTimer = setInterval(() => {
+      if (existsSync(exitMarker)) cleanup(configuredExit ?? 1)
+    }, 2)
+  }
 
   setInterval(() => {}, 1_000)
 } else if (operation === "check") {
   process.exit(liveMasterPid(socketFromFlag) === undefined ? 255 : 0)
 } else if (operation === "exit") {
-  const configuredExit = numberFromEnv("FAKE_SSH_EXIT_CODE")
+  const configuredExit =
+    numberFromEnv("FAKE_SSH_CONTROL_EXIT_CODE") ?? numberFromEnv("FAKE_SSH_EXIT_CODE")
   if (configuredExit !== undefined && configuredExit !== 0) process.exit(configuredExit)
 
   const pid = liveMasterPid(socketFromFlag)
   if (pid === undefined) process.exit(255)
-  removeState(socketFromFlag)
+  removeOwnedState(socketFromFlag, pid)
   try {
     process.kill(pid, "SIGTERM")
   } catch {
@@ -59,8 +79,39 @@ if (args.includes("-MN")) {
     appendFileSync(process.env.FAKE_SSH_INPUT_LOG, `${JSON.stringify(input)}\n`)
   }
 
+  if (
+    process.env.FAKE_SSH_REQUIRE_LIVE_MASTER === "1" &&
+    liveMasterPid(socketFromFlag) === undefined
+  ) {
+    process.stderr.write("fake ssh requires a live fake ControlMaster\n")
+    process.exit(255)
+  }
+
   const delayMs = numberFromEnv("FAKE_SSH_COMMAND_DELAY_MS") ?? 0
   if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+
+  const responses = responsesFromEnv()
+  const routed = responses?.find((response) => response.input === input)
+  if (routed) {
+    if (routed.trackPid) trackPidLifecycle(input)
+    if (routed.delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, routed.delayMs))
+    }
+    if (routed.stdout !== undefined) process.stdout.write(routed.stdout)
+    if (routed.stderr !== undefined) process.stderr.write(routed.stderr)
+    process.exit(routed.exitCode ?? 0)
+  }
+  const remoteRoute = routeFakeRemoteFilesystem(input)
+  if (remoteRoute) {
+    if (remoteRoute.stdout) process.stdout.write(remoteRoute.stdout)
+    if (remoteRoute.stderr) process.stderr.write(remoteRoute.stderr)
+    process.exit(remoteRoute.exitCode)
+  }
+  if (process.env.FAKE_SSH_FAIL_UNMATCHED === "1") {
+    const diagnostic = input.length > 1_024 ? `${input.slice(0, 1_024)}...[truncated]` : input
+    process.stderr.write(`fake ssh unmatched exact stdin: ${JSON.stringify(diagnostic)}\n`)
+    process.exit(2)
+  }
 
   const configuredChunks = chunksFromEnv()
   if (configuredChunks) {
@@ -98,14 +149,36 @@ function fakeStatePath(socketPath) {
 
 function liveMasterPid(socketPath) {
   if (!socketPath) return undefined
+  let state
   try {
-    const state = JSON.parse(readFileSync(fakeStatePath(socketPath), "utf8"))
-    if (!Number.isSafeInteger(state.pid) || state.pid <= 0) return undefined
+    state = JSON.parse(readFileSync(fakeStatePath(socketPath), "utf8"))
+  } catch (error) {
+    if (error?.code === "ENOENT") waitAtMissingMasterState()
+    return undefined
+  }
+  if (!Number.isSafeInteger(state.pid) || state.pid <= 0) return undefined
+  try {
     process.kill(state.pid, 0)
     return state.pid
-  } catch {
-    removeState(socketPath)
+  } catch (error) {
+    if (error?.code === "ESRCH") removeOwnedState(socketPath, state.pid)
     return undefined
+  }
+}
+
+function waitAtMissingMasterState() {
+  if (operation !== "check") return
+  const marker = process.env.FAKE_SSH_CHECK_MISS_MARKER
+  const release = process.env.FAKE_SSH_CHECK_MISS_RELEASE
+  if (!marker || !release) return
+  writeFileSync(marker, `${process.pid}\n`)
+  const deadline = Date.now() + 5_000
+  const sleeper = new Int32Array(new SharedArrayBuffer(4))
+  while (!existsSync(release)) {
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting to release fake SSH missing-state check")
+    }
+    Atomics.wait(sleeper, 0, 0, 5)
   }
 }
 
@@ -118,8 +191,15 @@ function removeOwnState(statePath) {
   }
 }
 
-function removeState(socketPath) {
-  if (socketPath) rmSync(fakeStatePath(socketPath), { force: true })
+function removeOwnedState(socketPath, pid) {
+  if (!socketPath) return
+  const statePath = fakeStatePath(socketPath)
+  try {
+    const state = JSON.parse(readFileSync(statePath, "utf8"))
+    if (state.pid === pid) rmSync(statePath, { force: true })
+  } catch {
+    // Missing, malformed, or concurrently replaced state is not ours to remove.
+  }
 }
 
 function numberFromEnv(name) {
@@ -127,6 +207,119 @@ function numberFromEnv(name) {
   if (value === undefined) return undefined
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function routeFakeRemoteFilesystem(input) {
+  if (!process.env.FAKE_REMOTE_ROOT) return undefined
+
+  const realpath = /^realpath -e -- (\/\S+)$/u.exec(input)
+  if (realpath) {
+    try {
+      statSync(fakeRemotePath(realpath[1]))
+      return { stdout: `${realpath[1]}\n`, exitCode: 0 }
+    } catch (error) {
+      if (error?.code === "ENOENT") return { exitCode: 1 }
+      return remoteFailure(error)
+    }
+  }
+
+  const parent = /^if mkdir -- (\/\S+) 2>\/dev\/null; then printf CREATED; elif \[ -d \1 \]; then printf EXISTS; else exit 1; fi$/u.exec(
+    input
+  )
+  if (parent) {
+    const local = fakeRemotePath(parent[1])
+    try {
+      const existing = statSync(local)
+      return existing.isDirectory()
+        ? { stdout: "EXISTS", exitCode: 0 }
+        : { exitCode: 1 }
+    } catch (error) {
+      if (error?.code !== "ENOENT") return remoteFailure(error)
+      try {
+        mkdirSync(local)
+        return { stdout: "CREATED", exitCode: 0 }
+      } catch (mkdirError) {
+        return remoteFailure(mkdirError)
+      }
+    }
+  }
+
+  const lock = /^if mkdir -- (\/\S+) 2>\/dev\/null; then if \(umask 077; set -C; printf %s ([a-f0-9]{64}) > (\/\S+)\);/u.exec(
+    input
+  )
+  if (lock) {
+    try {
+      mkdirSync(fakeRemotePath(lock[1]))
+      writeFileSync(fakeRemotePath(lock[3]), lock[2], { mode: 0o600 })
+      return { exitCode: 0 }
+    } catch (error) {
+      if (error?.code === "EEXIST") return { exitCode: 75 }
+      return remoteFailure(error)
+    }
+  }
+
+  const temporary = /^if \(umask 077; set -C; : > (\/\S+)\); then if chmod 600 -- \1; then exit 0; else exit 79; fi; else exit 74; fi$/u.exec(
+    input
+  )
+  if (temporary) {
+    try {
+      writeFileSync(fakeRemotePath(temporary[1]), "", {
+        flag: "wx",
+        mode: 0o600,
+      })
+      return { exitCode: 0 }
+    } catch (error) {
+      if (error?.code === "EEXIST") return { exitCode: 74 }
+      return remoteFailure(error)
+    }
+  }
+
+  const move = /^mv -fT -- (\/\S+) (\/\S+)$/u.exec(input)
+  if (move) {
+    try {
+      renameSync(fakeRemotePath(move[1]), fakeRemotePath(move[2]))
+      return { exitCode: 0 }
+    } catch (error) {
+      return remoteFailure(error)
+    }
+  }
+
+  const unlock = /^if \[ "\$\(cat -- (\/\S+) 2>\/dev\/null\)" = ([a-f0-9]{64}) \]; then rm -f -- \1 && rmdir -- (\/\S+); else exit 73; fi$/u.exec(
+    input
+  )
+  if (unlock) {
+    try {
+      if (readFileSync(fakeRemotePath(unlock[1]), "utf8") !== unlock[2]) {
+        return { exitCode: 73 }
+      }
+      rmSync(fakeRemotePath(unlock[1]), { force: true })
+      rmdirSync(fakeRemotePath(unlock[3]))
+      return { exitCode: 0 }
+    } catch (error) {
+      return remoteFailure(error)
+    }
+  }
+
+  return undefined
+}
+
+function fakeRemotePath(remotePath) {
+  const root = process.env.FAKE_REMOTE_ROOT
+  if (!root || !path.posix.isAbsolute(remotePath) || path.posix.normalize(remotePath) !== remotePath) {
+    throw new Error(`invalid fake remote path ${JSON.stringify(remotePath)}`)
+  }
+  const local = path.resolve(root, `.${remotePath}`)
+  if (local !== root && !local.startsWith(`${root}${path.sep}`)) {
+    throw new Error(`fake remote path escaped its root: ${JSON.stringify(remotePath)}`)
+  }
+  return local
+}
+
+function remoteFailure(error) {
+  return {
+    stderr: `fake remote filesystem failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    exitCode: 2,
+  }
 }
 
 function chunksFromEnv() {
@@ -152,6 +345,73 @@ function chunksFromEnv() {
     }
   }
   return chunks
+}
+
+function responsesFromEnv() {
+  const value = process.env.FAKE_SSH_RESPONSES
+  if (value === undefined) return undefined
+
+  let responses
+  try {
+    responses = JSON.parse(value)
+  } catch {
+    throw new TypeError("FAKE_SSH_RESPONSES must be a JSON array")
+  }
+  if (!Array.isArray(responses)) {
+    throw new TypeError("FAKE_SSH_RESPONSES must be a JSON array")
+  }
+
+  for (const [index, response] of responses.entries()) {
+    const validKeys = ["input", "stdout", "stderr", "exitCode", "delayMs", "trackPid"]
+    if (
+      response === null ||
+      typeof response !== "object" ||
+      Array.isArray(response) ||
+      Object.keys(response).some((key) => !validKeys.includes(key)) ||
+      typeof response.input !== "string" ||
+      (response.stdout !== undefined && typeof response.stdout !== "string") ||
+      (response.stderr !== undefined && typeof response.stderr !== "string") ||
+      (response.exitCode !== undefined &&
+        (!Number.isSafeInteger(response.exitCode) ||
+          response.exitCode < 0 ||
+          response.exitCode > 255)) ||
+      (response.delayMs !== undefined &&
+        (!Number.isFinite(response.delayMs) || response.delayMs < 0)) ||
+      (response.trackPid !== undefined && typeof response.trackPid !== "boolean")
+    ) {
+      throw new TypeError(`FAKE_SSH_RESPONSES entry ${index} is invalid`)
+    }
+  }
+  return responses
+}
+
+function trackPidLifecycle(input) {
+  const filePath =
+    process.env.FAKE_SSH_PID_LOG ??
+    (process.env.FAKE_SSH_LOG ? `${process.env.FAKE_SSH_LOG}.pids` : undefined)
+  if (!filePath) {
+    throw new TypeError("tracked responses require FAKE_SSH_PID_LOG or FAKE_SSH_LOG")
+  }
+
+  let exited = false
+  const append = (event) => {
+    appendFileSync(filePath, `${JSON.stringify({ event, pid: process.pid, input })}\n`)
+  }
+  const recordExit = () => {
+    if (exited) return
+    exited = true
+    append("exited")
+  }
+  append("started")
+  process.once("exit", recordExit)
+  process.once("SIGTERM", () => {
+    recordExit()
+    process.exit(143)
+  })
+  process.once("SIGINT", () => {
+    recordExit()
+    process.exit(130)
+  })
 }
 
 async function readStdin() {

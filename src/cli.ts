@@ -10,20 +10,38 @@ import {
   parseCli,
 } from "./launcher-config.js"
 import {
+  LOGGER_CHILD_ENV,
+  createFileLogger,
+  resolveDailyLogFilePath,
+  resolveDefaultLogDirectory,
+  type FileLogger,
+  type LogLevel,
+} from "./logger.js"
+import {
   runOpenCodeCompatibilityCheck,
   type OpenCodeCompatibilityHooks,
 } from "./opencode-compatibility.js"
+import { safeStartupErrorCode } from "./opencode-probe.js"
 import { readPackageMetadata } from "./package-metadata.js"
 import { spawnManaged, type ManagedProcess, type ProcessResult } from "./process.js"
 import {
+  confirmReadyHandshakeStability,
   removeReadyFile,
   ReadyHandshakeTimeoutError,
   waitForReadyHandshake,
   type ReadyHandshakeIdentity,
 } from "./ready-handshake.js"
-import { createLaunchPaths, createRuntimePaths } from "./runtime-paths.js"
+import {
+  createLaunchPaths,
+  createRuntimePaths,
+  resolveRuntimePaths,
+} from "./runtime-paths.js"
 import { SshClient } from "./ssh/client.js"
 import { ControlMaster } from "./ssh/control-master.js"
+import {
+  TASK_RESUME_PROTOCOL,
+  type TaskResumeCapability,
+} from "./task-resume-capability.js"
 
 const HELP = `Usage: opencode-ssh <ssh-alias> <absolute-remote-workdir>
        opencode-ssh self-test
@@ -41,19 +59,64 @@ const SAFETY_INSTRUCTIONS_PATH = fileURLToPath(
 )
 const PACKAGE_ROOT_URL = new URL("../", import.meta.url)
 
-interface ExitBeforeReady {
-  kind: "exit"
-  result: ProcessResult
-}
-
 interface Ready {
   kind: "ready"
+}
+
+type PreReadyCompletion =
+  | Ready
+  | { kind: "opencode"; result: ProcessResult }
+  | { kind: "master"; result: ProcessResult }
+
+export const LAUNCHER_CLEANUP_STEPS = [
+  "opencode",
+  "ready-marker",
+  "mirror",
+  "master",
+  "socket",
+  "listeners",
+] as const
+
+export type LauncherCleanupStep = (typeof LAUNCHER_CLEANUP_STEPS)[number]
+
+export interface LauncherCleanupFailure {
+  step: LauncherCleanupStep
+  error: unknown
+}
+
+export type LauncherCleanupOperations = Partial<
+  Record<LauncherCleanupStep, () => void | Promise<void>>
+>
+
+export interface LauncherDiagnosticsContext {
+  logDirectory: string
+  startupID: string
+}
+
+export interface LauncherHooks extends OpenCodeCompatibilityHooks {
+  onDiagnosticsAvailable?: (context: LauncherDiagnosticsContext) => void
+}
+
+export async function runLauncherCleanup(
+  operations: LauncherCleanupOperations
+): Promise<LauncherCleanupFailure[]> {
+  const failures: LauncherCleanupFailure[] = []
+  for (const step of LAUNCHER_CLEANUP_STEPS) {
+    const operation = operations[step]
+    if (!operation) continue
+    try {
+      await operation()
+    } catch (error) {
+      failures.push({ step, error })
+    }
+  }
+  return failures
 }
 
 export async function runCli(
   argv: readonly string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
-  compatibilityHooks: OpenCodeCompatibilityHooks = {}
+  compatibilityHooks: LauncherHooks = {}
 ): Promise<number> {
   const parsed = parseCli(argv)
   if (parsed.action === "help") {
@@ -64,10 +127,26 @@ export async function runCli(
     process.stdout.write(`${(await readPackageMetadata()).version}\n`)
     return 0
   }
+
+  const diagnostics = createLauncherDiagnostics(
+    env,
+    compatibilityHooks.onDiagnosticsAvailable
+  )
+  const startupLog = logLauncher(diagnostics, "info", "startup.begin", {
+    action: parsed.action,
+  })
+  await startupLog
   if (parsed.action === "launch" && /^(1|true)$/i.test(env.OPENCODE_PURE ?? "")) {
-    throw new LauncherConfigError(
+    const error = new LauncherConfigError(
       "OPENCODE_PURE=1 disables external plugins and cannot be used with opencode-ssh"
     )
+    await logLauncher(
+      diagnostics,
+      "error",
+      "launch.failed",
+      safeLauncherFailureFields("configuration", error)
+    )
+    throw error
   }
 
   const controller = new AbortController()
@@ -88,31 +167,64 @@ export async function runCli(
   let readyPath: string | undefined
   let socketPath: string | undefined
   let mirrorPath: string | undefined
+  let diagnosticLaunchID: string | undefined
+  let diagnosticTargetID: string | undefined
+  let stage: LauncherFailureStage = "compatibility"
 
-  try {
+  let signalExitCode: 130 | 143 | undefined
+  const execute = async (): Promise<number> => {
     const opencodeBinary = env.OPENCODE_SSH_OPENCODE_BIN || "opencode"
     const { testedOpenCodeVersion } = await readPackageMetadata()
-    await runOpenCodeCompatibilityCheck({
+    const compatibility = await runOpenCodeCompatibilityCheck({
       binary: opencodeBinary,
       env,
       signal: controller.signal,
       testedVersion: testedOpenCodeVersion,
       pluginURL: PACKAGE_ROOT_URL,
+      diagnostics: diagnostics.logDirectory
+        ? {
+            logger: diagnostics.logger,
+            logDirectory: diagnostics.logDirectory,
+            onWrite: () => markDiagnosticsAvailable(diagnostics),
+            startupID: diagnostics.startupID,
+          }
+        : undefined,
       writeProgress: compatibilityHooks.writeProgress,
       writeWarning: compatibilityHooks.writeWarning,
     })
+    const taskResumeCapability: TaskResumeCapability | undefined =
+      compatibility.taskResumeQualified ? TASK_RESUME_PROTOCOL : undefined
     if (parsed.action === "self-test") {
-      compatibilityHooks.writeProgress?.("self-test passed")
+      compatibilityHooks.writeProgress?.(
+        `self-test passed (OpenCode ${compatibility.detectedVersion}; Task resume ${compatibility.taskResumeQualified ? "enabled" : "disabled"})`
+      )
       return 0
     }
 
+    stage = "launch-paths"
     const launchPaths = await createLaunchPaths({ env })
+    diagnosticLaunchID = launchPaths.launchID
+    await logLauncher(
+      diagnostics,
+      "info",
+      "launch.context.created",
+      {},
+      diagnosticLaunchID
+    )
     socketPath = launchPaths.socketPath
     const sshBinary = env.OPENCODE_SSH_SSH_BIN || "ssh"
     const sftpBinary = env.OPENCODE_SSH_SFTP_BIN || "sftp"
 
+    stage = "ssh-master"
     compatibilityHooks.writeProgress?.("starting SSH session...")
-    master = await ControlMaster.start(
+    await logLauncher(
+      diagnostics,
+      "info",
+      "ssh.master.starting",
+      {},
+      diagnosticLaunchID
+    )
+    const launchMaster = await ControlMaster.start(
       parsed.alias,
       launchPaths.socketPath,
       controller.signal,
@@ -122,21 +234,74 @@ export async function runCli(
         startupTimeoutMs: 120_000,
       }
     )
+    master = launchMaster
+    await logLauncher(
+      diagnostics,
+      "info",
+      "ssh.master.started",
+      {},
+      diagnosticLaunchID
+    )
+    const masterCompletion = launchMaster
+      .wait()
+      .then((result) => ({ kind: "master" as const, result }))
 
     const ssh = new SshClient(parsed.alias, launchPaths.socketPath, {
       sshBinary,
       env,
     })
-    const canonicalWorkdir = await ssh.canonicalizeWorkdir(parsed.workdir)
-    const paths = await createRuntimePaths({
+    stage = "canonicalization"
+    await logLauncher(
+      diagnostics,
+      "info",
+      "ssh.canonicalization.started",
+      {},
+      diagnosticLaunchID
+    )
+    const canonicalization = await Promise.race([
+      masterCompletion,
+      ssh
+        .canonicalizeWorkdir(parsed.workdir, controller.signal)
+        .then((workdir) => ({ kind: "workdir" as const, workdir })),
+    ])
+    if (canonicalization.kind === "master") {
+      if (!controller.signal.aborted) {
+        controller.abort(masterBeforeReadyError(canonicalization.result))
+      }
+      throw masterBeforeReadyError(canonicalization.result)
+    }
+    const canonicalWorkdir = canonicalization.workdir
+    await logLauncher(
+      diagnostics,
+      "info",
+      "ssh.canonicalization.completed",
+      {},
+      diagnosticLaunchID
+    )
+    stage = "target-resolution"
+    const runtimePathOptions = {
       alias: parsed.alias,
       canonicalWorkdir,
       launchID: launchPaths.launchID,
       env,
-    })
-    readyPath = paths.readyPath
-    mirrorPath = paths.mirrorDir
+    }
+    const resolvedPaths = resolveRuntimePaths(runtimePathOptions)
+    diagnosticTargetID = resolvedPaths.targetID
+    await logLauncher(
+      diagnostics,
+      "info",
+      "target.resolved",
+      {},
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
+    readyPath = resolvedPaths.readyPath
+    mirrorPath = resolvedPaths.mirrorDir
+    const paths = await createRuntimePaths(runtimePathOptions)
     await removeReadyFile(paths.readyPath)
+    if (launchMaster.hasExited) {
+      throw masterBeforeReadyError(await launchMaster.wait())
+    }
 
     const nonce = randomBytes(32).toString("hex")
     const identity: ReadyHandshakeIdentity = {
@@ -152,12 +317,15 @@ export async function runCli(
       env.OPENCODE_CONFIG_CONTENT,
       PACKAGE_ROOT_URL,
       paths.launchID,
-      SAFETY_INSTRUCTIONS_PATH
+      SAFETY_INSTRUCTIONS_PATH,
+      compatibility.loaderRuntimeVersion,
+      taskResumeCapability
     )
     const childEnv: NodeJS.ProcessEnv = {
       ...env,
       PWD: paths.workspaceDir,
       OPENCODE_CONFIG_CONTENT: configContent,
+      OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS: "false",
       [REMOTE_ENV.alias]: parsed.alias,
       [REMOTE_ENV.workdir]: canonicalWorkdir,
       [REMOTE_ENV.socket]: paths.socketPath,
@@ -170,27 +338,75 @@ export async function runCli(
       [REMOTE_ENV.sshBinary]: sshBinary,
       [REMOTE_ENV.sftpBinary]: sftpBinary,
     }
+    delete childEnv[LOGGER_CHILD_ENV.directory]
+    delete childEnv[LOGGER_CHILD_ENV.startupID]
+    if (diagnostics.logDirectory) {
+      childEnv[LOGGER_CHILD_ENV.directory] = diagnostics.logDirectory
+      childEnv[LOGGER_CHILD_ENV.startupID] = diagnostics.startupID
+    }
+    delete childEnv[REMOTE_ENV.expectedOpenCodeRuntimeVersion]
+    delete childEnv[REMOTE_ENV.taskResumeCapability]
+    childEnv[REMOTE_ENV.expectedOpenCodeRuntimeVersion] =
+      compatibility.loaderRuntimeVersion
+    if (taskResumeCapability) {
+      childEnv[REMOTE_ENV.taskResumeCapability] = taskResumeCapability
+    }
 
-    openCode = spawnManaged(opencodeBinary, [], {
+    stage = "opencode-host"
+    await logLauncher(
+      diagnostics,
+      "info",
+      "opencode.host.starting",
+      {},
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
+    const launchedOpenCode = spawnManaged(opencodeBinary, [], {
       cwd: paths.workspaceDir,
       env: childEnv,
       signal: controller.signal,
+      terminationMode: "process-group",
       stdio: { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
     })
+    openCode = launchedOpenCode
+    await logLauncher(
+      diagnostics,
+      "info",
+      "opencode.host.started",
+      {},
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
 
     const readinessController = new AbortController()
     const readinessSignal = AbortSignal.any([
       controller.signal,
       readinessController.signal,
     ])
-    const first = await Promise.race<Ready | ExitBeforeReady>([
+    const openCodeCompletion = launchedOpenCode
+      .wait()
+      .then((result) => ({ kind: "opencode" as const, result }))
+    stage = "ready-wait"
+    await logLauncher(
+      diagnostics,
+      "info",
+      "ready.wait.started",
+      {},
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
+    const first = await Promise.race<PreReadyCompletion>([
+      masterCompletion,
+      openCodeCompletion,
       waitForReadyHandshake(paths.readyPath, identity, {
         timeoutMs: 30_000,
         signal: readinessSignal,
       }).then(() => ({ kind: "ready" as const })),
-      openCode.wait().then((result) => ({ kind: "exit" as const, result })),
     ]).finally(() => readinessController.abort())
-    if (first.kind === "exit") {
+    if (first.kind === "master") {
+      throw masterBeforeReadyError(first.result)
+    }
+    if (first.kind === "opencode") {
       try {
         await waitForReadyHandshake(paths.readyPath, identity, {
           timeoutMs: 0,
@@ -203,37 +419,446 @@ export async function runCli(
         )
       }
     }
+    void logLauncher(
+      diagnostics,
+      "info",
+      "ready.observed",
+      {},
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
 
+    stage = "ready-stability"
+    const readinessBoundary = await Promise.race([
+      masterCompletion,
+      confirmReadyHandshakeStability(paths.readyPath, identity, {
+        signal: controller.signal,
+      }).then(
+        () => ({ kind: "stable" as const }),
+        (error: unknown) => ({ kind: "readiness-error" as const, error })
+      ),
+    ])
+    if (readinessBoundary.kind === "master") {
+      throw masterBeforeReadyError(readinessBoundary.result)
+    }
+    if (readinessBoundary.kind === "readiness-error") {
+      if (launchMaster.hasExited) {
+        throw masterBeforeReadyError(await launchMaster.wait())
+      }
+      throw readinessBoundary.error
+    }
+    if (launchMaster.hasExited) {
+      throw masterBeforeReadyError(await launchMaster.wait())
+    }
+    void logLauncher(
+      diagnostics,
+      "info",
+      "ready.stable",
+      {},
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
+
+    stage = "active"
+    void logLauncher(
+      diagnostics,
+      "info",
+      "launch.active",
+      {},
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
     const active = await Promise.race<
       | { kind: "opencode"; result: ProcessResult }
       | { kind: "master"; result: ProcessResult }
     >([
-      openCode.wait().then((result) => ({ kind: "opencode" as const, result })),
-      master.wait().then((result) => ({ kind: "master" as const, result })),
+      masterCompletion,
+      openCodeCompletion,
     ])
     if (active.kind === "master" && !controller.signal.aborted) {
       throw new Error(
         `SSH ControlMaster exited while OpenCode was running (${describeExit(active.result)})`
       )
     }
-    const result = active.kind === "opencode" ? active.result : await openCode.wait()
-    if (receivedSignal === "SIGINT") return 130
-    if (receivedSignal === "SIGTERM") return 143
-    if (result.signal === "SIGINT") return 130
-    if (result.signal === "SIGTERM") return 143
+    const result =
+      active.kind === "opencode" ? active.result : await launchedOpenCode.wait()
+    void logLauncher(
+      diagnostics,
+      "info",
+      "opencode.host.exited",
+      {
+        exitCode: result.exitCode,
+        signal: result.signal,
+        termination: result.termination,
+      },
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
+    if (receivedSignal === "SIGINT") {
+      signalExitCode = 130
+      return signalExitCode
+    }
+    if (receivedSignal === "SIGTERM") {
+      signalExitCode = 143
+      return signalExitCode
+    }
+    if (result.signal === "SIGINT") {
+      signalExitCode = 130
+      return signalExitCode
+    }
+    if (result.signal === "SIGTERM") {
+      signalExitCode = 143
+      return signalExitCode
+    }
     return result.exitCode ?? 1
+  }
+
+  let exitCode: number | undefined
+  let primaryError: unknown
+  let failureStage: LauncherFailureStage | undefined
+  let failed = false
+  try {
+    exitCode = await execute()
   } catch (error) {
-    if (receivedSignal === "SIGINT") return 130
-    if (receivedSignal === "SIGTERM") return 143
-    throw error
-  } finally {
-    if (openCode) await openCode.terminate().catch(() => undefined)
-    if (readyPath) await removeReadyFile(readyPath).catch(() => undefined)
-    if (mirrorPath) await rm(mirrorPath, { recursive: true, force: true }).catch(() => undefined)
-    if (master) await master.close().catch(() => undefined)
-    if (socketPath) await rm(socketPath, { force: true }).catch(() => undefined)
-    process.removeListener("SIGINT", onSigint)
-    process.removeListener("SIGTERM", onSigterm)
+    failed = true
+    primaryError = error
+    failureStage = stage
+  }
+
+  stage = "cleanup"
+  const cleanupPromise = runLauncherCleanup({
+    opencode: openCode
+      ? async () => {
+          await openCode!.terminate()
+        }
+      : undefined,
+    "ready-marker": readyPath
+      ? () => removeReadyFile(readyPath!)
+      : undefined,
+    mirror: mirrorPath
+      ? () => rm(mirrorPath!, { recursive: true, force: true })
+      : undefined,
+    master: master ? () => master!.close() : undefined,
+    socket: socketPath ? () => rm(socketPath!, { force: true }) : undefined,
+    listeners: () => {
+      process.removeListener("SIGINT", onSigint)
+      process.removeListener("SIGTERM", onSigterm)
+    },
+  })
+  void logLauncher(
+    diagnostics,
+    "info",
+    "launch.cleanup.started",
+    {},
+    diagnosticLaunchID,
+    diagnosticTargetID
+  )
+  const cleanupFailures = await cleanupPromise
+  const cleanupLog = logLauncher(
+    diagnostics,
+    cleanupFailures.length === 0 ? "info" : "error",
+    "launch.cleanup.completed",
+    {
+      failureCount: cleanupFailures.length,
+      failedSteps: cleanupFailures.map(({ step }) => step),
+      ...(cleanupFailures[0]
+        ? safeLauncherFailureFields("cleanup", cleanupFailures[0].error)
+        : {}),
+    },
+    diagnosticLaunchID,
+    diagnosticTargetID
+  )
+  if (cleanupFailures.length > 0) await cleanupLog
+  else void cleanupLog
+
+  const receivedSignalCode =
+    receivedSignal === "SIGINT" ? 130 : receivedSignal === "SIGTERM" ? 143 : undefined
+  const preservedSignalCode = receivedSignalCode ?? signalExitCode
+  if (preservedSignalCode !== undefined) {
+    if (cleanupFailures.length > 0) {
+      reportCleanupWarning(compatibilityHooks, receivedSignal, cleanupFailures)
+    }
+    void logLauncher(
+      diagnostics,
+      "info",
+      parsed.action === "launch" ? "launch.exit" : "startup.exit",
+      { outcome: "signal", exitCode: preservedSignalCode },
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
+    return preservedSignalCode
+  }
+
+  if (cleanupFailures.length > 0) {
+    const failure = failed ? primaryError : cleanupFailures[0]?.error
+    await logLauncher(
+      diagnostics,
+      "error",
+      parsed.action === "launch" ? "launch.failed" : "startup.failed",
+      {
+        ...safeLauncherFailureFields(failureStage ?? "cleanup", failure),
+        cleanupFailureCount: cleanupFailures.length,
+      },
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
+    throw launcherCleanupError(cleanupFailures, failed ? primaryError : undefined, failed)
+  }
+  if (failed) {
+    await logLauncher(
+      diagnostics,
+      "error",
+      parsed.action === "launch" ? "launch.failed" : "startup.failed",
+      safeLauncherFailureFields(failureStage ?? "active", primaryError),
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
+    throw primaryError
+  }
+
+  const completedExitCode = exitCode ?? 1
+  void logLauncher(
+    diagnostics,
+    "info",
+    parsed.action === "launch" ? "launch.exit" : "startup.exit",
+    { outcome: "completed", exitCode: completedExitCode },
+    diagnosticLaunchID,
+    diagnosticTargetID
+  )
+  return completedExitCode
+}
+
+interface LauncherDiagnostics {
+  logger: FileLogger
+  logDirectory?: string
+  onDiagnosticsAvailable?: (context: LauncherDiagnosticsContext) => void
+  reportedAvailable: boolean
+  startupID: string
+}
+
+type LauncherFailureStage =
+  | "configuration"
+  | "compatibility"
+  | "launch-paths"
+  | "ssh-master"
+  | "canonicalization"
+  | "target-resolution"
+  | "opencode-host"
+  | "ready-wait"
+  | "ready-stability"
+  | "active"
+  | "cleanup"
+
+const NOOP_LOGGER: FileLogger = {
+  async log() {
+    return false
+  },
+}
+
+function createLauncherDiagnostics(
+  env: NodeJS.ProcessEnv,
+  onDiagnosticsAvailable: LauncherHooks["onDiagnosticsAvailable"]
+): LauncherDiagnostics {
+  let startupID: string
+  try {
+    startupID = randomBytes(16).toString("hex")
+  } catch {
+    return {
+      logger: NOOP_LOGGER,
+      onDiagnosticsAvailable,
+      reportedAvailable: false,
+      startupID: "unavailable",
+    }
+  }
+
+  try {
+    const logDirectory = resolveDefaultLogDirectory({ env })
+    return {
+      logger: createFileLogger({ env }),
+      logDirectory,
+      onDiagnosticsAvailable,
+      reportedAvailable: false,
+      startupID,
+    }
+  } catch {
+    return {
+      logger: NOOP_LOGGER,
+      onDiagnosticsAvailable,
+      reportedAvailable: false,
+      startupID,
+    }
+  }
+}
+
+async function logLauncher(
+  diagnostics: LauncherDiagnostics,
+  level: LogLevel,
+  event: string,
+  fields: Readonly<Record<string, unknown>> = {},
+  launchID?: string,
+  targetID?: string
+): Promise<boolean> {
+  try {
+    const written = await diagnostics.logger.log({
+      level,
+      event,
+      fields: {
+        ...fields,
+        component: "launcher",
+        startupID: diagnostics.startupID,
+        ...(launchID ? { launchID } : {}),
+        ...(targetID ? { targetID } : {}),
+      },
+    })
+    if (written) markDiagnosticsAvailable(diagnostics)
+    return written
+  } catch {
+    // Diagnostics must never change launcher behavior.
+    return false
+  }
+}
+
+function markDiagnosticsAvailable(diagnostics: LauncherDiagnostics): void {
+  if (diagnostics.reportedAvailable || !diagnostics.logDirectory) return
+  diagnostics.reportedAvailable = true
+  try {
+    diagnostics.onDiagnosticsAvailable?.({
+      logDirectory: diagnostics.logDirectory,
+      startupID: diagnostics.startupID,
+    })
+  } catch {
+    // Availability reporting is best-effort diagnostics only.
+  }
+}
+
+function safeLauncherFailureFields(
+  stage: LauncherFailureStage,
+  error: unknown
+): Readonly<Record<string, unknown>> {
+  const code =
+    safeStartupErrorCode(error) ?? safeStartupErrorCode(errorCause(error))
+  return {
+    stage,
+    errorCategory: launcherFailureCategory(stage),
+    errorName: safeErrorName(error),
+    ...(code ? { errorCode: code } : {}),
+  }
+}
+
+function launcherFailureCategory(stage: LauncherFailureStage): string {
+  switch (stage) {
+    case "configuration":
+      return "configuration"
+    case "compatibility":
+      return "compatibility"
+    case "launch-paths":
+    case "target-resolution":
+      return "filesystem"
+    case "ssh-master":
+    case "canonicalization":
+      return "ssh"
+    case "opencode-host":
+      return "process"
+    case "ready-wait":
+    case "ready-stability":
+      return "readiness"
+    case "active":
+      return "runtime"
+    case "cleanup":
+      return "cleanup"
+  }
+}
+
+function safeErrorName(error: unknown): string {
+  let name: string
+  try {
+    if (!(error instanceof Error)) return "NonError"
+    name = error.name
+  } catch {
+    return "Error"
+  }
+  switch (name) {
+    case "AbortError":
+    case "AggregateError":
+    case "ControlMasterError":
+    case "Error":
+    case "LauncherConfigError":
+    case "OpenCodeHealthResponseError":
+    case "ProcessError":
+    case "ProcessTerminationError":
+    case "RangeError":
+    case "ReadyHandshakeTimeoutError":
+    case "ReadyHandshakeValidationError":
+    case "SshClientError":
+    case "SyntaxError":
+    case "TypeError":
+      return name
+    default:
+      return "Error"
+  }
+}
+
+function errorCause(error: unknown): unknown {
+  try {
+    return error instanceof Error ? error.cause : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function currentLogFilePath(context: LauncherDiagnosticsContext): string {
+  return resolveDailyLogFilePath({ logDirectory: context.logDirectory })
+}
+
+function masterBeforeReadyError(result: ProcessResult): Error {
+  return new Error(
+    `SSH ControlMaster exited before the remote plugin became ready (${describeExit(result)})`
+  )
+}
+
+function launcherCleanupError(
+  failures: readonly LauncherCleanupFailure[],
+  primaryError: unknown,
+  hasPrimaryError: boolean
+): AggregateError {
+  const cleanupErrors = failures.map(
+    ({ step, error }) =>
+      new Error(`${step} cleanup failed: ${errorMessage(error)}`, { cause: error })
+  )
+  const detail = failures
+    .map(({ step, error }) => `${step}: ${errorMessage(error)}`)
+    .join("; ")
+  if (hasPrimaryError) {
+    return new AggregateError(
+      [primaryError, ...cleanupErrors],
+      `${errorMessage(primaryError)}; OpenCode SSH cleanup also failed: ${detail}`,
+      { cause: primaryError }
+    )
+  }
+  return new AggregateError(cleanupErrors, `OpenCode SSH cleanup failed: ${detail}`)
+}
+
+function reportCleanupWarning(
+  hooks: OpenCodeCompatibilityHooks,
+  signal: NodeJS.Signals | undefined,
+  failures: readonly LauncherCleanupFailure[]
+): void {
+  const detail = failures
+    .map(({ step, error }) => `${step}: ${errorMessage(error)}`)
+    .join("; ")
+  const report = hooks.writeWarning ?? hooks.writeProgress
+  try {
+    report?.(`cleanup after ${signal ?? "signal termination"} was incomplete: ${detail}`)
+  } catch {
+    // Reporting must not replace the signal-derived exit status.
+  }
+}
+
+function errorMessage(error: unknown): string {
+  try {
+    return error instanceof Error ? error.message : String(error)
+  } catch {
+    return "Unknown error"
   }
 }
 
@@ -244,14 +869,27 @@ function describeExit(result: ProcessResult): string {
 }
 
 async function main(): Promise<void> {
+  let diagnostics: LauncherDiagnosticsContext | undefined
   try {
     process.exitCode = await runCli(process.argv.slice(2), process.env, {
+      onDiagnosticsAvailable: (context) => {
+        diagnostics = context
+      },
       writeProgress: (message) => process.stderr.write(`opencode-ssh: ${message}\n`),
       writeWarning: (message) => process.stderr.write(`opencode-ssh: warning: ${message}\n`),
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = errorMessage(error)
     process.stderr.write(`opencode-ssh: ${message}\n`)
+    if (diagnostics) {
+      try {
+        process.stderr.write(
+          `opencode-ssh: diagnostics: ${currentLogFilePath(diagnostics)} (startupID ${diagnostics.startupID})\n`
+        )
+      } catch {
+        // Resolving or reporting diagnostics must not replace the launch error.
+      }
+    }
     process.exitCode = 1
   }
 }

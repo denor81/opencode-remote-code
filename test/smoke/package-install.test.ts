@@ -209,6 +209,7 @@ describe("installed package", () => {
       expect(versionCommand.stdout).toBe(`${installedManifest.version}\n`)
       expect(selfTestCommand.stderr).toContain("compatibility passed")
       expect(selfTestCommand.stderr).toContain("self-test passed")
+      expect(selfTestCommand.stderr).toContain("Task resume enabled")
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true })
     }
@@ -241,6 +242,11 @@ function createNpmEnvironment(
     ...env,
     HOME: isolatedHome,
     USERPROFILE: isolatedHome,
+    XDG_CACHE_HOME: path.join(temporaryRoot, "cache"),
+    XDG_CONFIG_HOME: path.join(temporaryRoot, "config"),
+    XDG_DATA_HOME: path.join(temporaryRoot, "data"),
+    XDG_RUNTIME_DIR: path.join(temporaryRoot, "run"),
+    XDG_STATE_HOME: path.join(temporaryRoot, "state"),
     NO_COLOR: "1",
     npm_config_audit: "false",
     npm_config_cache: path.join(temporaryRoot, "npm-cache"),

@@ -1,11 +1,13 @@
 import { readFile, readdir, stat, writeFile, mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   READY_PROTOCOL,
+  READY_STABILITY_INTERVAL_MS,
   ReadyHandshakeTimeoutError,
   ReadyHandshakeValidationError,
+  confirmReadyHandshakeStability,
   createReadyRecord,
   hashNonce,
   removeReadyFile,
@@ -119,6 +121,45 @@ describe("waitForReadyHandshake", () => {
     }
     await writeFile(readyPath, JSON.stringify(record), "utf8")
     await expect(waitForReadyHandshake(readyPath, identity)).rejects.toThrow(/record shape/)
+  })
+})
+
+describe("confirmReadyHandshakeStability", () => {
+  it("re-reads and rejects a marker removed during the production interval", async () => {
+    await writeReadyHandshake(readyPath, identity)
+    await waitForReadyHandshake(readyPath, identity, { timeoutMs: 0 })
+    let confirmation: Promise<ReadyRecord> | undefined
+
+    vi.useFakeTimers()
+    try {
+      confirmation = confirmReadyHandshakeStability(readyPath, identity)
+      const result = expect(confirmation).rejects.toThrow(
+        /disappeared during the startup stability interval/i
+      )
+      await removeReadyFile(readyPath)
+      await vi.advanceTimersByTimeAsync(READY_STABILITY_INTERVAL_MS)
+      await result
+    } finally {
+      await vi.runOnlyPendingTimersAsync()
+      vi.useRealTimers()
+      await confirmation?.catch(() => undefined)
+    }
+  })
+
+  it("accepts an unchanged nonce-bound marker after the production interval", async () => {
+    await writeReadyHandshake(readyPath, identity)
+    let confirmation: Promise<ReadyRecord> | undefined
+
+    vi.useFakeTimers()
+    try {
+      confirmation = confirmReadyHandshakeStability(readyPath, identity)
+      await vi.advanceTimersByTimeAsync(READY_STABILITY_INTERVAL_MS)
+      await expect(confirmation).resolves.toEqual(createReadyRecord(identity))
+    } finally {
+      await vi.runOnlyPendingTimersAsync()
+      vi.useRealTimers()
+      await confirmation?.catch(() => undefined)
+    }
   })
 })
 
