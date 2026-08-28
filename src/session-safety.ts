@@ -25,34 +25,31 @@ const SSH_PROJECT_PERMISSIONS = [
 ] as const
 
 declare const statusAttemptTokenBrand: unique symbol
-declare const identityAttemptTokenBrand: unique symbol
 declare const projectAdmissionTokenBrand: unique symbol
 
 export interface StatusAttemptToken {
   readonly [statusAttemptTokenBrand]: true
 }
 
-export interface IdentityAttemptToken {
-  readonly [identityAttemptTokenBrand]: true
-}
-
 export interface ProjectAdmissionToken {
   readonly [projectAdmissionTokenBrand]: true
 }
 
-export type BashExecutionAdmission =
-  | { readonly kind: "identity"; readonly attempt: IdentityAttemptToken }
-  | { readonly kind: "project"; readonly admission: ProjectAdmissionToken }
+export interface BashExecutionAdmission {
+  readonly kind: "project"
+  readonly admission: ProjectAdmissionToken
+}
+
+export interface RemoteIdentity {
+  readonly hostname: string
+  readonly user: string
+  readonly workdir: string
+}
 
 interface SessionState {
   generation: bigint
-  phase:
-    | "blocked"
-    | "status-pending"
-    | "status-ready"
-    | "identity-pending"
-    | "complete"
-  attempt?: StatusAttemptToken | IdentityAttemptToken
+  phase: "blocked" | "status-pending" | "complete"
+  attempt?: StatusAttemptToken
 }
 
 interface ProjectAdmissionEvidence {
@@ -107,12 +104,12 @@ export class SessionSafety {
     return attempt
   }
 
-  /** A completed healthy result starts a new identity epoch. */
+  /** A completed, validated status result completes this session's preflight. */
   recordStatusResult(
     sessionID: string,
     attempt: StatusAttemptToken,
-    result: Pick<RemoteCommandResult, "exitCode">
-  ): void {
+    result: RemoteCommandResult
+  ): RemoteIdentity | null {
     const id = requireSessionID(sessionID)
     const state = this.sessions.get(id)
     if (state?.phase !== "status-pending" || state.attempt !== attempt) {
@@ -125,116 +122,48 @@ export class SessionSafety {
         generation: state.generation,
         phase: "blocked",
       })
-      return
-    }
-    this.sessions.set(id, {
-      generation: state.generation,
-      phase: "status-ready",
-    })
-  }
-
-  beforeBash(
-    context: Pick<ToolContext, "sessionID" | "agent">,
-    command: string,
-    workdir?: string
-  ): BashExecutionAdmission {
-    const sessionID = requireSessionID(context.sessionID)
-    const state = this.sessions.get(sessionID)
-
-    if (state?.phase === "complete") {
-      if (context.agent === "explore") {
-        throw new Error(
-          "OpenCode SSH explore sessions cannot use package Bash after identity preflight"
-        )
-      }
-      return {
-        kind: "project",
-        admission: this.admitProject(sessionID),
-      }
+      return null
     }
 
-    if (state?.phase !== "status-ready") {
-      throw new Error(
-        "OpenCode SSH preflight requires a healthy package remote_status call before Bash"
-      )
-    }
-    if (command !== IDENTITY_COMMAND) {
-      throw new Error(
-        `OpenCode SSH preflight permits only the exact identity preflight command ${JSON.stringify(
-          IDENTITY_COMMAND
-        )}`
-      )
-    }
-    const generation = this.nextSessionGeneration(sessionID)
-    this.sessions.set(sessionID, {
-      generation,
-      phase: "blocked",
-    })
-    this.revokeProjectAdmissions(sessionID)
-    if (workdir !== undefined) {
-      throw new Error(
-        "OpenCode SSH identity preflight rejects any explicit workdir; omit workdir to use the canonical launch root"
-      )
-    }
-    const attempt = Object.freeze({}) as IdentityAttemptToken
-    this.sessions.set(sessionID, {
-      generation,
-      phase: "identity-pending",
-      attempt,
-    })
-    return { kind: "identity", attempt }
-  }
-
-  completeIdentity(
-    sessionID: string,
-    attempt: IdentityAttemptToken,
-    result: RemoteCommandResult
-  ): void {
-    const id = requireSessionID(sessionID)
-    const state = this.sessions.get(id)
-    if (state?.phase !== "identity-pending" || state.attempt !== attempt) {
-      throw new Error(
-        "OpenCode SSH identity preflight completion was stale or superseded"
-      )
-    }
     this.sessions.set(id, {
       generation: state.generation,
       phase: "blocked",
     })
-
-    if (result.exitCode !== 0) {
-      identityFailure(`command exited with code ${result.exitCode}`)
-    }
-    if (result.stdoutTruncated) {
-      identityFailure("command output was truncated")
-    }
-
-    const lines = result.stdout.split("\n")
-    if (lines.at(-1) === "") lines.pop()
-    if (lines.length !== 3) {
-      identityFailure("command did not return exactly hostname, user, and workdir lines")
-    }
-    if (!lines[0].trim()) identityFailure("hostname was empty")
-    if (!lines[1].trim()) identityFailure("user was empty")
-    if (lines[2] !== this.canonicalWorkdir) {
-      identityFailure(
-        `canonical workdir ${JSON.stringify(lines[2])} did not match ${JSON.stringify(
-          this.canonicalWorkdir
-        )}`
-      )
-    }
-
+    const identity = validateRemoteIdentity(result, this.canonicalWorkdir)
     this.sessions.set(id, {
       generation: state.generation,
       phase: "complete",
     })
+    return identity
+  }
+
+  beforeBash(
+    context: Pick<ToolContext, "sessionID" | "agent">,
+    _command: string,
+    _workdir?: string
+  ): BashExecutionAdmission {
+    const sessionID = requireSessionID(context.sessionID)
+    if (this.sessions.get(sessionID)?.phase !== "complete") {
+      throw new Error(
+        "OpenCode SSH preflight requires a successful package remote_status call before Bash"
+      )
+    }
+    if (context.agent === "explore") {
+      throw new Error(
+        "OpenCode SSH explore sessions cannot use package Bash after remote_status preflight"
+      )
+    }
+    return {
+      kind: "project",
+      admission: this.admitProject(sessionID),
+    }
   }
 
   requirePreflight(sessionID: string): void {
     const state = this.sessions.get(requireSessionID(sessionID))
     if (state?.phase !== "complete") {
       throw new Error(
-        "OpenCode SSH session preflight is incomplete; call package remote_status and then the exact identity Bash command"
+        "OpenCode SSH session preflight is incomplete; call package remote_status"
       )
     }
   }
@@ -244,7 +173,7 @@ export class SessionSafety {
     const state = this.sessions.get(id)
     if (state?.phase !== "complete") {
       throw new Error(
-        "OpenCode SSH session preflight is incomplete; call package remote_status and then the exact identity Bash command"
+        "OpenCode SSH session preflight is incomplete; call package remote_status"
       )
     }
     const admission = Object.freeze({}) as ProjectAdmissionToken
@@ -1061,8 +990,42 @@ function requireNonEmpty(value: string, field: string): string {
   return value
 }
 
-function identityFailure(reason: string): never {
-  throw new Error(`OpenCode SSH identity preflight failed: ${reason}`)
+function validateRemoteIdentity(
+  result: Pick<
+    RemoteCommandResult,
+    "stdout" | "stdoutTruncated" | "stderrTruncated"
+  >,
+  canonicalWorkdir: string
+): RemoteIdentity {
+  if (result.stdoutTruncated || result.stderrTruncated) {
+    statusFailure("identity command output was truncated")
+  }
+
+  const lines = result.stdout.split("\n")
+  if (lines.at(-1) === "") lines.pop()
+  if (lines.length !== 3) {
+    statusFailure(
+      "identity command did not return exactly hostname, user, and workdir lines"
+    )
+  }
+  if (!lines[0].trim()) statusFailure("hostname was empty")
+  if (!lines[1].trim()) statusFailure("user was empty")
+  if (lines[2] !== canonicalWorkdir) {
+    statusFailure(
+      `canonical workdir ${JSON.stringify(lines[2])} did not match ${JSON.stringify(
+        canonicalWorkdir
+      )}`
+    )
+  }
+  return Object.freeze({
+    hostname: lines[0],
+    user: lines[1],
+    workdir: lines[2],
+  })
+}
+
+function statusFailure(reason: string): never {
+  throw new Error(`OpenCode SSH remote_status preflight failed: ${reason}`)
 }
 
 function invalidSessionResponse(sessionID: string): never {

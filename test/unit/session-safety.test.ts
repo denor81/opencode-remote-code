@@ -1,12 +1,10 @@
 import type { PluginInput, ToolContext, ToolDefinition } from "@opencode-ai/plugin"
 import { describe, expect, it, vi } from "vitest"
 import {
-  IDENTITY_COMMAND,
   SessionSafety,
   createTaskGuard,
   createTaskHooks,
   guardProjectTool,
-  type IdentityAttemptToken,
 } from "../../src/session-safety.js"
 import type { RemoteCommandResult } from "../../src/ssh/client.js"
 import { TaskResumeRegistry } from "../../src/task-resume-registry.js"
@@ -14,21 +12,15 @@ import { TaskResumeRegistry } from "../../src/task-resume-registry.js"
 const REMOTE_WORKDIR = "/srv/project"
 
 describe("session preflight safety", () => {
-  it("requires status and then the exact identity command before project work", () => {
+  it("requires one validated remote_status result before project work", () => {
     const safety = new SessionSafety(REMOTE_WORKDIR)
 
     expect(() => safety.requirePreflight("root")).toThrow(/preflight/i)
     expect(() =>
-      safety.beforeBash(toolContext({ sessionID: "root" }), IDENTITY_COMMAND)
+      safety.beforeBash(toolContext({ sessionID: "root" }), "printf blocked")
     ).toThrow(/remote_status/i)
 
     recordStatus(safety, "root")
-    expect(() =>
-      safety.beforeBash(toolContext({ sessionID: "root" }), "pwd -P")
-    ).toThrow(/exact identity preflight command/i)
-    const identityAttempt = beginIdentity(safety, "root")
-
-    safety.completeIdentity("root", identityAttempt, identityResult())
     expect(() => safety.requirePreflight("root")).not.toThrow()
     expect(
       safety.beforeBash(toolContext({ sessionID: "root" }), "printf ready")
@@ -38,19 +30,18 @@ describe("session preflight safety", () => {
   })
 
   it.each([
-    ["non-zero exit", identityResult({ exitCode: 7 })],
     ["empty hostname", identityResult({ stdout: `\nremote-user\n${REMOTE_WORKDIR}\n` })],
     ["empty user", identityResult({ stdout: `remote-host\n \n${REMOTE_WORKDIR}\n` })],
     ["wrong workdir", identityResult({ stdout: "remote-host\nremote-user\n/srv/other\n" })],
     ["extra output", identityResult({ stdout: `noise\nremote-host\nremote-user\n${REMOTE_WORKDIR}\n` })],
-    ["truncated output", identityResult({ stdoutTruncated: true })],
-  ])("leaves identity incomplete after %s", (_name, result) => {
+    ["truncated stdout", identityResult({ stdoutTruncated: true })],
+    ["truncated stderr", identityResult({ stderrTruncated: true })],
+  ])("leaves preflight incomplete after %s", (_name, result) => {
     const safety = new SessionSafety(REMOTE_WORKDIR)
-    recordStatus(safety, "root")
-    const identityAttempt = beginIdentity(safety, "root")
+    const attempt = safety.beginStatusCheck("root")
 
-    expect(() => safety.completeIdentity("root", identityAttempt, result)).toThrow(
-      /identity preflight failed/i
+    expect(() => safety.recordStatusResult("root", attempt, result)).toThrow(
+      /remote_status preflight failed/i
     )
     expect(() => safety.requirePreflight("root")).toThrow(/preflight/i)
   })
@@ -66,7 +57,7 @@ describe("session preflight safety", () => {
     expect(() => safety.requirePreflight("second")).not.toThrow()
   })
 
-  it("revokes status and identity after an observed unhealthy status result", () => {
+  it("revokes preflight after an observed unhealthy status result", () => {
     const safety = new SessionSafety(REMOTE_WORKDIR)
     completePreflight(safety, "root")
 
@@ -75,11 +66,11 @@ describe("session preflight safety", () => {
 
     expect(() => safety.requirePreflight("root")).toThrow(/preflight/i)
     expect(() =>
-      safety.beforeBash(toolContext({ sessionID: "root" }), IDENTITY_COMMAND)
+      safety.beforeBash(toolContext({ sessionID: "root" }), "printf blocked")
     ).toThrow(/remote_status/i)
   })
 
-  it("begins every status check by revoking prior status and identity", () => {
+  it("begins every status check by revoking prior preflight", () => {
     const safety = new SessionSafety(REMOTE_WORKDIR)
     completePreflight(safety, "root")
 
@@ -87,7 +78,7 @@ describe("session preflight safety", () => {
 
     expect(() => safety.requirePreflight("root")).toThrow(/preflight/i)
     expect(() =>
-      safety.beforeBash(toolContext({ sessionID: "root" }), IDENTITY_COMMAND)
+      safety.beforeBash(toolContext({ sessionID: "root" }), "printf blocked")
     ).toThrow(/remote_status/i)
   })
 
@@ -119,103 +110,42 @@ describe("session preflight safety", () => {
         identityResult({ exitCode: 1 })
       )
     ).toThrow(/stale|superseded/i)
-
-    const identityAttempt = beginIdentity(safety, "root")
-    safety.completeIdentity("root", identityAttempt, identityResult())
     expect(() => safety.requirePreflight("root")).not.toThrow()
   })
 
-  it("consumes status at identity admission and rejects its completion after a newer epoch", () => {
+  it("an invalid newer status cannot retain a previous completed preflight", () => {
     const safety = new SessionSafety(REMOTE_WORKDIR)
-    recordStatus(safety, "root")
-    const staleIdentityAttempt = beginIdentity(safety, "root")
-
-    expect(() =>
-      safety.beforeBash(toolContext({ sessionID: "root" }), IDENTITY_COMMAND)
-    ).toThrow(/remote_status/i)
+    completePreflight(safety, "root")
 
     const currentStatusAttempt = safety.beginStatusCheck("root")
-    safety.recordStatusResult("root", currentStatusAttempt, identityResult())
     expect(() =>
-      safety.completeIdentity("root", staleIdentityAttempt, identityResult())
-    ).toThrow(/stale|superseded/i)
-
-    const currentIdentityAttempt = beginIdentity(safety, "root")
-    safety.completeIdentity("root", currentIdentityAttempt, identityResult())
-    expect(() => safety.requirePreflight("root")).not.toThrow()
-  })
-
-  it("resets identity on healthy status re-entry and keeps it reset after failure", () => {
-    const safety = new SessionSafety(REMOTE_WORKDIR)
-    completePreflight(safety, "root")
-
-    recordStatus(safety, "root")
-
-    expect(() => safety.requirePreflight("root")).toThrow(/preflight/i)
-    const failedAttempt = beginIdentity(safety, "root")
-    expect(() =>
-      safety.completeIdentity(
+      safety.recordStatusResult(
         "root",
-        failedAttempt,
+        currentStatusAttempt,
         identityResult({ stdout: "remote-host\nremote-user\n/srv/wrong\n" })
       )
-    ).toThrow(/identity preflight failed/i)
+    ).toThrow(/remote_status preflight failed/i)
     expect(() => safety.requirePreflight("root")).toThrow(/preflight/i)
-    expect(() =>
-      safety.beforeBash(toolContext({ sessionID: "root" }), IDENTITY_COMMAND)
-    ).toThrow(/remote_status/i)
 
     recordStatus(safety, "root")
-    const successfulAttempt = beginIdentity(safety, "root")
-    safety.completeIdentity("root", successfulAttempt, identityResult())
     expect(() => safety.requirePreflight("root")).not.toThrow()
   })
 
-  it("a failed identity completion cannot retain a previous identity", () => {
+  it("permits custom Bash workdirs after completed preflight", () => {
     const safety = new SessionSafety(REMOTE_WORKDIR)
     completePreflight(safety, "root")
-    recordStatus(safety, "root")
-    const identityAttempt = beginIdentity(safety, "root")
-
-    expect(() =>
-      safety.completeIdentity(
-        "root",
-        identityAttempt,
-        identityResult({ exitCode: 9 })
-      )
-    ).toThrow(/identity preflight failed/i)
-    expect(() => safety.requirePreflight("root")).toThrow(/preflight/i)
-  })
-
-  it("rejects any explicit identity workdir but permits custom workdirs after preflight", () => {
-    const safety = new SessionSafety(REMOTE_WORKDIR)
-    recordStatus(safety, "root")
     const root = toolContext({ sessionID: "root" })
 
-    expect(() =>
-      safety.beforeBash(root, IDENTITY_COMMAND, REMOTE_WORKDIR)
-    ).toThrow(/identity preflight.*explicit workdir/i)
-
-    recordStatus(safety, "root")
-    const identityAttempt = beginIdentity(safety, "root")
-    safety.completeIdentity("root", identityAttempt, identityResult())
     expect(safety.beforeBash(root, "pwd -P", "/srv/other")).toMatchObject({
       kind: "project",
     })
   })
 
-  it("limits explore Bash to its identity preflight while retaining project reads", async () => {
+  it("denies explore Bash after preflight while retaining project reads", async () => {
     const safety = new SessionSafety(REMOTE_WORKDIR)
     recordStatus(safety, "explore-session")
     const explore = toolContext({ sessionID: "explore-session", agent: "explore" })
 
-    const admission = safety.beforeBash(explore, IDENTITY_COMMAND)
-    expect(admission.kind).toBe("identity")
-    if (admission.kind !== "identity") throw new Error("Expected identity admission")
-    safety.completeIdentity("explore-session", admission.attempt, identityResult())
-    expect(() => safety.beforeBash(explore, IDENTITY_COMMAND)).toThrow(
-      /explore.*Bash/i
-    )
     expect(() => safety.beforeBash(explore, "printf mutation")).toThrow(
       /explore.*Bash/i
     )
@@ -1396,28 +1326,11 @@ type TaskHooksFixture = ReturnType<typeof createTaskHooks>
 
 function completePreflight(safety: SessionSafety, sessionID: string): void {
   recordStatus(safety, sessionID)
-  const identityAttempt = beginIdentity(safety, sessionID)
-  safety.completeIdentity(sessionID, identityAttempt, identityResult())
 }
 
 function recordStatus(safety: SessionSafety, sessionID: string): void {
   const attempt = safety.beginStatusCheck(sessionID)
   safety.recordStatusResult(sessionID, attempt, identityResult())
-}
-
-function beginIdentity(
-  safety: SessionSafety,
-  sessionID: string
-): IdentityAttemptToken {
-  const admission = safety.beforeBash(
-    toolContext({ sessionID }),
-    IDENTITY_COMMAND
-  )
-  expect(admission.kind).toBe("identity")
-  if (admission.kind !== "identity") {
-    throw new Error("Expected identity admission")
-  }
-  return admission.attempt
 }
 
 function identityResult(

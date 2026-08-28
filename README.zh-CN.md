@@ -38,7 +38,8 @@ npm run install:verified
 中，Windows 应通过 WSL 运行。远端要求 GNU/Linux、SFTP、POSIX `sh`，并使用
 `pwd -P`、`hostname`、`whoami`、`uname`、GNU `realpath -e --`、`stat -c`、
 `mv -fT --` 及常用 GNU 文件/搜索工具。`git`、`file` 和 `rg` 可选并有降级路径；
-启动不再读取远程 `AGENTS.md`，因此不要求 `head`。不支持把 macOS 作为远端目标。
+`remote_status` 会在内部运行 `hostname; whoami; pwd -P`。启动不再读取远程
+`AGENTS.md`，因此不要求 `head`。不支持把 macOS 作为远端目标。
 
 完整的英文安装、SSH 配置、本地启动脚本、安全说明和手动 TUI 测试请参阅
 [Installation And Usage](docs/installation-and-usage.md)。
@@ -52,6 +53,23 @@ opencode-ssh <ssh-alias> <absolute-remote-workdir>
 ```
 
 模型、provider、权限、插件和 MCP 配置继续使用普通 OpenCode 配置。
+
+若要让每个 session 的固定 `remote_status` 预检无需反复提示，可在本机全局
+`~/.config/opencode/opencode.json` 中加入以下顶层配置，然后完全重启 OpenCode：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "remote_status": "allow"
+  }
+}
+```
+
+应把 `permission` 合并进现有配置而不是覆盖其他设置。该规则只允许
+`remote_status` 内部固定执行并验证 `hostname; whoami; pwd -P`，不会允许任意
+Bash、文件读取或修改。完整合并方式见
+[Installation And Usage](docs/installation-and-usage.md#configure-the-remote-status-permission)。
 
 启动 SSH 之前，launcher 会检查本机 `opencode --version`，并在隔离的 HOME、
 config 和 workspace 中运行 `opencode debug config` 真实 loader 检查。Probe
@@ -118,7 +136,7 @@ root 会话和每个直接子会话的 instructions，并保留已有 instructio
 
 ## 控制分类
 
-- **Package 代码强制执行：** 每会话状态/身份预检、项目工具和 root Task gate、
+- **Package 代码强制执行：** 每会话一步式 `remote_status` 预检及内置远程身份验证、项目工具和 root Task gate、
   仅 root 可启动前台直接 Task、子会话/background Task 拒绝、深度 0/1、经启动资格
   检查的同次启动 resume、launch-local 所有权 registry 和原子准入、`mcp.remote`
   冲突拒绝，以及 SSH/SFTP 和文件事务检查。
@@ -165,7 +183,8 @@ loader/runtime 兼容版本仍可运行新的前台直接 Task，但每个 `task
   epoch；同一时刻只能准入一个 resumer。
 - 准入会清除 child 旧的 package 预检。使用任何项目工具前，并且在 registry 可再次
   release 该 child 之前，resumed child 必须完成一个全新的 package `remote_status`
-  加准确 `hostname; whoami; pwd -P` identity epoch，且不得显式指定 workdir。
+  预检；该工具会在 canonical launch workdir 内部运行并验证准确
+  `hostname; whoami; pwd -P`。
 - Reservation 一旦完成，失败、缺失、格式错误、中止、取消或 uncertain 的准入或
   completion 会让该 child 在本次启动中永久锁定。不得重试该 ID；应启动新的前台
   direct child 并提供所需上下文。
@@ -191,13 +210,14 @@ project tool 前必须完成预检；root 在调用 Task 前也必须完成。Fr
 仍可完成注册。操作员指导仍要求每个 child 在远程项目工作前执行预检。Resume 更严格：
 准入会清除 child 旧状态，成功 registry release 前必须完成新的预检。
 
-每次 status 或 identity 尝试都会推进 per-session generation；新 generation 会撤销旧
-证据，并中止 active package project SSH、SFTP 和 mutation lease。拒绝、失败、取消、
-不健康或身份不匹配都会让 package 项目工具和 root Task 保持阻塞，直到新的健康
-`remote_status` 加准确 `hostname; whoami; pwd -P` identity 成功。已经完成的远程
-commit 和已经准入的 upstream Task execution 不会被追溯撤销。父会话证据不会复制。
-identity 完成前 Bash 只允许该准确命令；完成后内置 `explore` 仍不能使用 package
-Bash，但可在 host policy 允许时使用 package `read`、`glob`、`grep`。
+每次 `remote_status` 尝试都会推进 per-session generation；新 generation 会撤销旧
+预检，并中止 active package project SSH、SFTP 和 mutation lease。该工具内部运行
+`hostname; whoami; pwd -P`，并要求零退出、未截断、准确三行输出、非空 hostname/user
+以及匹配 canonical launch workdir。拒绝、失败、取消、非零、截断、格式错误或身份
+不匹配都会让 package 项目工具和 root Task 保持阻塞，直到新的 `remote_status` 完全
+成功。已经完成的远程 commit 和已经准入的 upstream Task execution 不会被追溯撤销。
+父会话证据不会复制。Package Bash 不是预检机制；内置 `explore` 不能使用 package
+Bash，但可在预检后按 host policy 使用 package `read`、`glob`、`grep`。
 
 只读兄弟会话可以重叠。可修改项目的兄弟会话必须使用互不重叠的路径。一个 plugin
 实例中的 package 文件修改共享 operation-wide mutex，但不支持并发编辑同一路径；
@@ -209,7 +229,8 @@ Bash、MCP、其他 plugin、另一 module 实例和不协作的远程写入者�
 ## 工具边界
 
 以下工具通过 SSH 工作：`bash`、`read`、`write`、`edit`、`glob`、`grep`、
-`apply_patch`。`remote_status` 会在权限通过后使用 SSH 检查并报告连接状态。
+`apply_patch`。`remote_status` 会检查并报告连接状态、验证远程身份并完成 session
+预检。
 
 Task 未列入这些通过 SSH 执行的工具，因为它是本机 OpenCode 的编排工具。
 
@@ -220,10 +241,10 @@ Task 未列入这些通过 SSH 执行的工具，因为它是本机 OpenCode 的
 ### 权限时序
 
 Package 预检会在路径解析、baseline 读取、SSH/SFTP 准备或工具专属权限请求之前
-拒绝项目工具。启动 `remote_status` 或准确 identity Bash 会推进 session generation、
-清除旧预检并中止 active package project lease；`remote_status` 在健康 SSH 之前请求
-权限。预检
-完成后，路径规范化可发生在 `bash`、`read`、`glob`、`grep` 专属提示之前；
+拒绝项目工具。启动 `remote_status` 会推进 session generation、清除旧预检并中止
+active package project lease；它会先请求自己的权限，再运行内部固定 identity SSH
+命令，不会产生单独的预检 `bash` 请求。预检完成后，路径规范化可发生在 `bash`、
+`read`、`glob`、`grep` 专属提示之前；
 `write`、`edit`、`apply_patch` 还会在 `edit` 提示前拉取当前内容以生成 diff。
 词法路径已在 workdir 外时，会先请求 `external_directory` 再规范化。对应批准前
 不会执行请求的 Bash 命令或文件修改。准备阶段内容保存在私有 launch mirror 中，
@@ -333,14 +354,13 @@ OpenCode 1.18.18、包含安全同次启动 resume 的准确六场景 manifest �
 failed、skipped、todo 都为零。2026-08-28 的最终证据如下：
 
 - `npm run lint` 通过，`npm run build` 重复运行均通过。
-- 真实已安装 OpenCode 1.18.23 self-test 通过，runtime source 为
-  `client._client.get`；Task resume disabled。
+- 真实已安装 OpenCode 1.18.25 self-test 通过；Task resume disabled。
 - focused merged diagnostics/lifecycle gate 为 100/100。
 - 完整 installed-loader gate 为 3/3、零 skip。其真实 target-free self-test 在 port
   4096 为每个已解析 localhost loopback 地址持有有效 health decoy，connections 和
   requests 均为零，观察来源为 `client._client.get`；real-serve production
   activation/disposal 和 correlated startup log 也通过。
-- 普通已安装 OpenCode 1.18.23 的 Task suite 为 6/6；resume disabled，每个
+- 普通已安装 OpenCode 1.18.25 的 Task suite 为 6/6；resume disabled，每个
   `task_id` 都在 upstream 执行前被拒绝，新的 Task fallback 通过。
 - 精确 baseline binary
   `/tmp/opencode/opencode-ai-1.18.18/node_modules/.bin/opencode` 解析为
@@ -349,10 +369,12 @@ failed、skipped、todo 都为零。2026-08-28 的最终证据如下：
   scenario。
 - 第六个精确场景从 root model-visible Task result 取得 `task_id`，与实际 direct child
   交叉验证，证明相同 package write 在新预检前被阻止且 SSH/SFTP preparation 为零；
-  随后重复完整预检，并通过 fake-SFTP get、private put 和 `mv -fT --` 原子完成预期
-  最终内容。
-- `npm test` 通过 32 个 unit/integration file 和 459/459 个 test，随后 2 个 smoke
-  file、2 个 test 以 2/2 通过；单独的 `npm run test:smoke` 为 2/2。
+  随后通过一个新的 `remote_status`，并通过 fake-SFTP get、private put 和
+  `mv -fT --` 原子完成预期最终内容。
+- 每个自动化 root、child 和 resumed-child 预检都只使用一个 `remote_status` SSH
+  identity 命令，没有单独的 Bash 预检。
+- `npm test` 通过 32 个 unit/integration file 和 453/453 个 test，随后 2 个 smoke
+  file、2 个 test 以 2/2 通过。
 - `npm pack --dry-run` 通过并列出 166 个文件，`git diff --check` 通过。
 - 实际 installed-loader integration 通过动态选择的 test-only IPv4 loopback port
   运行真实 OpenCode serve process；serve mode 的 host-configured SDK transport 使用

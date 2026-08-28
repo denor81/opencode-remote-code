@@ -2,7 +2,9 @@
 
 After package preflight, package `bash`, `read`, `write`, `edit`, `glob`, `grep`,
 and `apply_patch` are SSH-backed. Package `remote_status` reports the selected
-alias, canonical workdir, target ID, and connection health.
+alias, canonical workdir, target ID, and connection health; it also executes and
+validates the fixed `hostname; whoami; pwd -P` remote identity command and
+completes that session's preflight.
 
 Other OpenCode tools, external plugins, MCP servers, LSPs, formatters, provider
 clients, TUI file APIs, and OpenCode internals execute from the local OpenCode
@@ -26,7 +28,7 @@ OpenCode permissions.
 
 | Class | Security meaning |
 | --- | --- |
-| Package-enforced | Private per-session preflight state; project-tool and root-Task gates; root-only foreground Task; runtime rejection of child/background Task; startup-qualified same-launch resume with launch-local ownership and atomic admission; collision check for `mcp.remote`; SSH/SFTP process policy; and package file transaction checks. |
+| Package-enforced | Private one-step per-session `remote_status` preflight state; project-tool and root-Task gates; root-only foreground Task; runtime rejection of child/background Task; startup-qualified same-launch resume with launch-local ownership and atomic admission; collision check for `mcp.remote`; SSH/SFTP process policy; and package file transaction checks. |
 | OpenCode host policy | Tool catalogs and configured global, per-agent, and session permission decisions. The package requests permissions but does not implement or sandbox the host permission UI. |
 | Prompt/operator guidance | The injected safety text, disjoint sibling scopes, reviewed administration, final remote verification, and manual release checklist. Prompt compliance is not an enforcement boundary. |
 
@@ -135,19 +137,22 @@ admission/completion leaves the child permanently locked for that launch.
 Package code does not automatically retry; start a fresh child and supply the
 required context instead.
 
-An admitted resume clears the child's old package status and identity state
-before upstream Task execution. The resumed child must complete a full new
-package `remote_status` plus exact `hostname; whoami; pwd -P` identity epoch with
-no explicit workdir before any package project tool and before successful
-registry release. Parent ownership, requested and observed agent, session
-permissions, completion metadata, and security epochs are checked around the
-run. Exact model continuity is not recorded or promised. Trusted plugins or
-direct SDK/session calls that bypass the observed Task hooks remain TCB limits.
+An admitted resume clears the child's old package preflight state before
+upstream Task execution. The resumed child must complete a full new package
+`remote_status` preflight before any package project tool and before successful
+registry release. That tool runs and validates `hostname; whoami; pwd -P` in the
+canonical launch workdir internally. Parent ownership, requested and observed
+agent, session permissions, completion metadata, and security epochs are
+checked around the run. Exact model continuity is not recorded or promised.
+Trusted plugins or direct SDK/session calls that bypass the observed Task hooks
+remain TCB limits.
 
 The resolved policy adds `remote_status: ask` only when neither global nor the
 configured `explore` policy explicitly matches that permission. Stable global
 and per-agent policy is supported. Package permission requests use no persistent
-`always` patterns, so a host-policy `ask` can prompt for each call. OpenCode
+`always` patterns, so a host-policy `ask` can prompt for each call. The host
+authorizes the fixed internal identity command through `remote_status`; this
+does not grant arbitrary package Bash. OpenCode
 1.18.18 does not inherit parent session asks into Task children. If a root
 session `ask` matches `remote_status`, `bash`, `read`, `edit`, `glob`, `grep`, or
 `external_directory`, package code rejects delegation and directs the operator
@@ -166,19 +171,20 @@ requires completed preflight before that session's package project tools and
 also before root Task. It does not require a fresh child that used no package
 project tools to preflight merely to become resumable. Operator guidance still
 directs every child to preflight before remote project work. When preflight is
-needed, that session calls package `remote_status`, then package Bash with
-exactly `hostname; whoami; pwd -P` and no explicit workdir.
+needed, that session calls package `remote_status` once. The tool internally
+runs `hostname; whoami; pwd -P` in the canonical launch workdir.
 
-Every status or identity attempt advances a per-session generation. The new
+Every `remote_status` attempt advances a per-session generation. The new
 generation revokes prior evidence and aborts active package project SSH, SFTP,
-and mutation leases. Denial, cancellation, policy/transport failure, unhealthy
-status, non-zero or malformed identity output, or workdir mismatch leaves
-package project tools and root Task code-enforced blocked until a new healthy
-status plus identity succeeds. Already completed remote commits and
-already-admitted upstream Task execution are not retroactively undone. Before
-identity, package Bash allows only that command. After identity, built-in
-`explore` remains restricted to identity-only package Bash; its package
-read/glob/grep calls remain subject to host policy.
+and mutation leases. Preflight completes atomically only after a zero-exit,
+non-truncated, exact three-line result with non-empty hostname/user and a workdir
+matching the canonical launch root. Denial, cancellation, policy/transport
+failure, non-zero or malformed output, or workdir mismatch leaves package
+project tools and root Task code-enforced blocked until a new `remote_status`
+fully succeeds. Already completed remote commits and already-admitted upstream
+Task execution are not retroactively undone. Package Bash is not a preflight
+mechanism. Built-in `explore` cannot use package Bash; its package read/glob/grep
+calls remain subject to host policy after preflight.
 
 Read-only siblings may overlap. Mutation-capable siblings require disjoint path
 scopes; same-path concurrent editing is unsupported. One plugin instance
@@ -194,10 +200,10 @@ descendants.
 
 - Package project tools reject on incomplete preflight before path resolution,
   baseline transfer, permission preparation, SSH, or SFTP.
-- Starting `remote_status` or exact identity Bash advances the session
-  generation, invalidates old state, and aborts active package project leases.
-  `remote_status` asks before opening its health SSH channel. A failed or denied
-  recheck leaves the session invalidated.
+- Starting `remote_status` advances the session generation, invalidates old
+  state, and aborts active package project leases. It asks for its own permission
+  before running the fixed identity SSH command. No separate preflight `bash`
+  request occurs. A failed or denied recheck leaves the session invalidated.
 - After preflight, lexical external paths ask for `external_directory` before a
   canonicalization probe. Other path canonicalization can occur before the
   tool-specific `bash`, `read`, `glob`, `grep`, or `edit` request.
@@ -345,14 +351,16 @@ universal termination of real remote descendants.
 
 Final 2026-08-28 automated evidence passed the exact OpenCode 1.18.18
 six-scenario manifest with safe same-launch resume and installed real-Task
-fake-SFTP mutation. Ordinary installed OpenCode 1.18.23 also passed 6/6 with
-resume disabled and fresh fallback. Formal direct-child release evidence remains
-incomplete only for real-SSH two-sibling mutation and real permission UI and
-direct-child TUI behavior; `npm run test:real` was not run. Earlier `5/5` records
-are historical pre-resume evidence and are not the current six-scenario result.
+fake-SFTP mutation. Ordinary installed OpenCode 1.18.25 also passed 6/6 with
+resume disabled and fresh fallback. Every automated preflight used one
+`remote_status` identity SSH command and no separate Bash preflight. Formal
+direct-child release evidence remains incomplete only for real-SSH two-sibling
+mutation and real permission UI and direct-child TUI behavior;
+`npm run test:real` was not run. Earlier `5/5` records are historical pre-resume
+evidence and are not the current six-scenario result.
 
 The same final cycle's focused runtime-health/logging evidence passed lint/build,
-actual OpenCode 1.18.23 self-test with Task resume disabled, a merged 100/100
+actual OpenCode 1.18.25 self-test with Task resume disabled, a merged 100/100
 gate, and installed-loader 3/3 with zero skips. The target-free localhost:4096
 decoys saw zero connections/requests and the observer reported
 `client._client.get`; real-serve activation/disposal and correlated logs also

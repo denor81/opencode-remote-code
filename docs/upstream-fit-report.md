@@ -9,7 +9,7 @@ Status: HARDENING RELEASE INCOMPLETE. The final verified 2026-08-28 automated ev
 | OpenCode manual TUI baseline | 1.18.18 |
 | OpenCode automated loader observation | The normal installed-loader harness passed with a real serve process on a dynamically selected, test-only IPv4-loopback port; runtime health used the host-configured SDK transport through that process-owned listener, no fixed fixture port is a production trust input, and the separate pre-SSH probe remains no-listener `opencode debug config` |
 | OpenCode automated direct-child Task baseline | Exact explicit 1.18.18 passed the exact six-name manifest, 6/6 with zero failed/skipped; resume scenario enabled |
-| OpenCode automated direct-child Task observation | Ordinary installed 1.18.23 passed 6/6; resume disabled and fresh fallback passed |
+| OpenCode automated direct-child Task observation | Ordinary installed 1.18.25 passed 6/6; resume disabled and fresh fallback passed |
 | opencode-ssh | 0.1.0 |
 | Local OS | Linux x86_64 |
 | Local Node.js | Node.js 22 compatible runtime |
@@ -41,12 +41,13 @@ interchangeable evidence boundaries.
 | --- | --- |
 | `npm run lint` | Pass; strict production and test/helper TypeScript checks |
 | `npm run build` | Pass repeatedly |
-| Normal installed OpenCode Task observation | OpenCode 1.18.23; all 6/6 scenarios passed, resume remained disabled, `task_id` was rejected before upstream execution, and fresh fallback passed |
+| Normal installed OpenCode Task observation | OpenCode 1.18.25; all 6/6 scenarios passed, resume remained disabled, `task_id` was rejected before upstream execution, and fresh fallback passed |
 | `OPENCODE_TASK_TEST_BINARY=/tmp/opencode/opencode-ai-1.18.18/node_modules/.bin/opencode npm run test:task-baseline` | Exact explicit 1.18.18 selected; the command path resolved to `/tmp/opencode/opencode-ai-1.18.18/node_modules/opencode-ai/bin/opencode.exe`; exact six-name manifest accepted; 6 passed, 0 failed, 0 skipped; resume scenario enabled |
-| Exact sixth Task scenario | Root used the model-visible Task result ID and cross-checked the actual child; an identical package write was blocked before renewed preflight with zero SSH/SFTP preparation; renewed status/identity then completed atomic fake-SFTP get, private put, and `mv -fT --` with expected final content |
+| Exact sixth Task scenario | Root used the model-visible Task result ID and cross-checked the actual child; an identical package write was blocked before renewed preflight with zero SSH/SFTP preparation; one renewed `remote_status` then completed atomic fake-SFTP get, private put, and `mv -fT --` with expected final content |
+| One-step package preflight | Every automated root, direct child, and resumed child used one `remote_status` SSH invocation of `hostname; whoami; pwd -P`; no separate Bash preflight tool call or `bash` permission was used |
 | Installed real-Task fake-SFTP mutation | Pass in the exact sixth scenario; this is real installed OpenCode Task with fake SFTP transport, not real-host SFTP evidence |
 | Actual installed loader integration | Pass, 3/3 with zero skips; launches a real OpenCode serve process on a dynamically selected, test-only IPv4-loopback port, observes runtime health through the host-configured SDK transport using that process-owned listener, crosses plugin activation and the 25 ms stable-ready boundary, and verifies production activation/disposal with correlated startup logs; no fixed fixture port is trusted by production, the pre-SSH probe remains no-listener `opencode debug config`, and SSH/SFTP transport is fake |
-| `npm test` | Pass; 32 unit/integration files and 459/459 tests, then 2 smoke files/tests passed 2/2 |
+| `npm test` | Pass; 32 unit/integration files and 453/453 tests, then 2 smoke files/tests passed 2/2 |
 | `npm run test:smoke` | Pass; 2/2 |
 | `npm pack --dry-run` | Pass; 166 files listed; volatile tarball hashes and sizes are not release claims |
 | `git diff --check` | Pass |
@@ -70,7 +71,7 @@ These focused gates passed in the same final 2026-08-28 cycle:
 | Gate/boundary | Result |
 | --- | --- |
 | Lint and build | Pass |
-| Actual installed OpenCode self-test | Pass on 1.18.23; runtime source reported `client._client.get`; Task resume disabled |
+| Actual installed OpenCode self-test | Pass on 1.18.25; Task resume disabled |
 | Focused merged gate | 100/100 passed |
 | Installed loader gate | 3/3 passed with zero skips |
 | Exact target-free no-listener self-test | Valid health decoys held every resolved localhost loopback address at port 4096; OpenCode made zero connections and zero requests; health used the configured in-process SDK path and reported `client._client.get` |
@@ -258,8 +259,8 @@ Current audit-hardening decision: **NO-GO for formal direct-child release** unti
 the two separately approved real/manual boundaries are observed.
 
 Final 2026-08-28 automated Task evidence is green on exact OpenCode 1.18.18 and
-ordinary installed OpenCode 1.18.23. The exact six-scenario baseline, installed real-Task
-fake-SFTP mutation, default tests, separate smoke, and package dry-run are no
+ordinary installed OpenCode 1.18.25. The exact six-scenario baseline, installed
+real-Task fake-SFTP mutation, default tests, smoke, and package dry-run are no
 longer pending. Historical real-host transport/file/lifecycle and OpenCode
 1.18.18 live-Bash TUI evidence remains recorded, but it does not prove the
 hardened direct-child permission UI or real-SSH sibling mutation path.

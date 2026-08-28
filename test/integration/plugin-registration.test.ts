@@ -180,6 +180,11 @@ describe("server plugin registration", () => {
           remoteWorkdir: fixture.remoteWorkdir,
           connectionId: fixture.targetID,
           controlMaster: "healthy",
+          identity: {
+            hostname: "fixture-hostname",
+            user: "fixture-user",
+            workdir: fixture.remoteWorkdir,
+          },
           subagentPolicy: {
             requestedDepth: 4,
             effectiveDepth: 1,
@@ -192,13 +197,6 @@ describe("server plugin registration", () => {
         expect.objectContaining({ permission: "remote_status", always: [] })
       )
 
-      await tools!.bash.execute(
-        {
-          command: "hostname; whoami; pwd -P",
-          description: "Verify remote identity",
-        },
-        toolContext(ask)
-      )
       await expect(
         hooks["tool.execute.before"]!(
           { tool: "task", sessionID: "session", callID: "ready-task" },
@@ -233,22 +231,19 @@ describe("server plugin registration", () => {
           { tool: "task", sessionID: "session", callID: "denied-recheck-task" },
           { args: {} }
         )
-      ).rejects.toThrow(/preflight/i)
-      await tools!.bash.execute(
-        {
-          command: "hostname; whoami; pwd -P",
-          description: "Re-verify after denied status",
-        },
-        toolContext(ask)
-      )
-      await expect(
-        hooks["tool.execute.before"]!(
-          { tool: "task", sessionID: "session", callID: "denied-reverified-task" },
-          { args: {} }
-        )
       ).resolves.toBeUndefined()
 
-      process.env.FAKE_SSH_EXIT_CODE = "1"
+      const responses = JSON.parse(process.env.FAKE_SSH_RESPONSES!) as Array<{
+        input: string
+        stdout?: string
+        exitCode?: number
+      }>
+      const identityResponse = responses.find(({ input }) =>
+        input.endsWith("hostname; whoami; pwd -P")
+      )
+      if (!identityResponse) throw new Error("Missing identity response fixture")
+      identityResponse.exitCode = 1
+      process.env.FAKE_SSH_RESPONSES = JSON.stringify(responses)
       const unhealthyStatus = await tools!.remote_status.execute(
         {},
         toolContext(ask)
@@ -263,24 +258,12 @@ describe("server plugin registration", () => {
         )
       ).rejects.toThrow(/preflight/i)
 
-      process.env.FAKE_SSH_EXIT_CODE = "0"
+      identityResponse.exitCode = 0
+      process.env.FAKE_SSH_RESPONSES = JSON.stringify(responses)
       await tools!.remote_status.execute({}, toolContext(ask))
       await expect(
         hooks["tool.execute.before"]!(
           { tool: "task", sessionID: "session", callID: "recheck-task" },
-          { args: {} }
-        )
-      ).rejects.toThrow(/preflight/i)
-      await tools!.bash.execute(
-        {
-          command: "hostname; whoami; pwd -P",
-          description: "Re-verify remote identity",
-        },
-        toolContext(ask)
-      )
-      await expect(
-        hooks["tool.execute.before"]!(
-          { tool: "task", sessionID: "session", callID: "reverified-task" },
           { args: {} }
         )
       ).resolves.toBeUndefined()
@@ -336,7 +319,7 @@ describe("server plugin registration", () => {
       expect(output.system.at(-1)).not.toContain("REMOTE_AGENTS_TASK2_MARKER")
 
       const sshCalls = parseJsonLines<string[]>(await readFile(fixture.sshLog, "utf8"))
-      expect(sshCalls).toHaveLength(12)
+      expect(sshCalls).toHaveLength(6)
       for (const args of sshCalls) {
         expect(args).toEqual([
           "-T",
@@ -359,8 +342,20 @@ describe("server plugin registration", () => {
         ])
       }
       const sshInputs = parseJsonLines<string>(await readFile(fixture.sshInputLog, "utf8"))
-      expect(sshInputs).toHaveLength(12)
+      expect(sshInputs).toEqual([
+        "uname -s",
+        `git -C '${fixture.remoteWorkdir}' rev-parse --is-inside-work-tree 2>/dev/null`,
+        ...Array.from(
+          { length: 4 },
+          () =>
+            `cd '${fixture.remoteWorkdir}' || exit $?\nhostname; whoami; pwd -P`
+        ),
+      ])
       expect(sshInputs.some((input) => input.includes("AGENTS.md"))).toBe(false)
+      expect(ask).toHaveBeenCalledTimes(4)
+      expect(
+        ask.mock.calls.every(([request]) => request.permission === "remote_status")
+      ).toBe(true)
 
       expect(hooks.dispose).toEqual(expect.any(Function))
       await hooks.dispose?.()
@@ -897,7 +892,7 @@ describe("server plugin registration", () => {
         "exact task_id of a successfully completed foreground direct child"
       )
       expect(output.system.at(-1)).toContain(
-        "repeat package remote_status and the exact identity Bash preflight"
+        "repeat the one-step package remote_status preflight"
       )
     } finally {
       await hooks?.dispose?.()
@@ -1906,13 +1901,6 @@ async function completePluginPreflight(
   agent: string
 ): Promise<void> {
   await tools.remote_status.execute({}, toolContext(ask, sessionID, agent))
-  await tools.bash.execute(
-    {
-      command: "hostname; whoami; pwd -P",
-      description: "Verify remote identity",
-    },
-    toolContext(ask, sessionID, agent)
-  )
 }
 
 function taskResult(parentSessionId: string, sessionId: string) {

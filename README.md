@@ -35,13 +35,14 @@ responsible for `~/.ssh/config`, keys, `ssh-agent`, host verification,
   Windows users should run the launcher in WSL rather than native Windows.
 - System `ssh` and `sftp` clients.
 - A GNU/Linux SSH target with SFTP and POSIX `sh`. Startup and project tools use
-  `pwd -P`, `true`, `hostname`, `whoami`, `uname`, GNU `realpath -e --`, GNU
-  `stat -c`, GNU `mv -fT --`, and the usual GNU `mkdir`, `rmdir`, `chmod`, `rm`,
-  `cat`, `ls`, `dd`, `od`, `grep`, `find`, `sort`, and `cut` behavior. `git`,
-  `file`, and `rg` are optional; Git detection degrades to non-Git, and file and
-  search tools have documented fallbacks. `head` is not required because remote
-  `AGENTS.md` is not read automatically. A macOS remote is not supported by this
-  command contract.
+  `pwd -P`, `hostname`, `whoami`, `uname`, GNU `realpath -e --`, GNU `stat -c`,
+  GNU `mv -fT --`, and the usual GNU `mkdir`, `rmdir`, `chmod`, `rm`, `cat`,
+  `ls`, `dd`, `od`, `grep`, `find`, `sort`, and `cut` behavior. `remote_status`
+  invokes `hostname; whoami; pwd -P` internally. `git`, `file`, and `rg` are
+  optional; Git detection degrades to non-Git, and file and search tools have
+  documented fallbacks. `head` is not required because remote `AGENTS.md` is
+  not read automatically. A macOS remote is not supported by this command
+  contract.
 
 ## Install
 
@@ -51,10 +52,11 @@ npm run install:verified
 
 This installs the locked dependencies, runs the local test suite, builds and
 installs `opencode-ssh`, then runs the installed compatibility self-test. It
-requires OpenCode, `ssh`, and `sftp`, but no SSH target or provider. See the complete
-[installation and usage guide](docs/installation-and-usage.md) for OpenCode
-installation, SSH setup, a fixed-target local script, project safety
-instructions, and first-launch verification.
+requires OpenCode, `ssh`, and `sftp`, but no SSH target or provider. See the
+complete [installation and usage guide](docs/installation-and-usage.md) for
+OpenCode installation, the optional prompt-free `remote_status` permission, SSH
+setup, a fixed-target local script, project safety instructions, and
+first-launch verification.
 
 ## SSH Configuration
 
@@ -180,7 +182,7 @@ All operations still run with the SSH user's Unix permissions. Use explicit
 
 | Class | What it covers |
 | --- | --- |
-| Package-enforced | Per-session status/identity preflight, project-tool and root-Task gates, root-only foreground Task, child/background rejection, depth 0/1 policy, startup-qualified same-launch resume with an ownership registry and atomic admission, `mcp.remote` collision rejection, SSH/SFTP no-retry behavior, and file transaction checks. |
+| Package-enforced | One-step per-session `remote_status` preflight with embedded remote identity validation, project-tool and root-Task gates, root-only foreground Task, child/background rejection, depth 0/1 policy, startup-qualified same-launch resume with an ownership registry and atomic admission, `mcp.remote` collision rejection, SSH/SFTP no-retry behavior, and file transaction checks. |
 | OpenCode host policy | Tool visibility and evaluation of configured global, per-agent, and session permission rules. This package does not replace OpenCode's permission engine. |
 | Prompt/operator guidance | The injected safety document, disjoint child scopes, reviewed `sudo`, final remote verification, and manual fit procedures. Guidance is not a sandbox control. |
 
@@ -227,10 +229,10 @@ decision. When startup qualification enables resume, all of these rules apply:
   root, direct child, `subagent_type`, observed agent, root and child permission
   fingerprints, and relevant security epochs. Only one resumer can be admitted.
 - Admission clears the child's old package preflight. The resumed child must
-  complete a full new package `remote_status` plus exact
-  `hostname; whoami; pwd -P` identity epoch with no explicit workdir before any
-  project tool and before the registry can release that child for another
-  sequential resume.
+  complete a full new package `remote_status` preflight before any project tool
+  and before the registry can release that child for another sequential resume.
+  The tool runs and validates `hostname; whoami; pwd -P` in the canonical launch
+  workdir internally.
 - Once reserved, a failed, missing, malformed, aborted, canceled, or uncertain
   admission or completion permanently locks that child for the launch. Do not
   retry that ID; start a fresh direct child and include the required context.
@@ -263,16 +265,17 @@ guidance still directs every child to preflight before remote project work.
 Resume is stricter: admission clears the child's old state, and successful
 registry release requires the resumed child to renew preflight.
 
-Each status or identity attempt advances a per-session generation; a new
-generation revokes prior evidence and aborts active package project SSH, SFTP,
-and mutation leases. A denied, failed, canceled, unhealthy, or mismatched
-attempt leaves package project tools and root Task blocked until a new healthy
-`remote_status` plus exact `hostname; whoami; pwd -P` identity succeeds.
-Completed remote commits and already-admitted upstream Task execution are not
-retroactively undone. Parent evidence is never copied. Before identity, Bash
-accepts only that exact command; after identity, built-in `explore` still cannot
-use package Bash, although its package `read`, `glob`, and `grep` tools can
-operate subject to host policy.
+Each `remote_status` attempt advances a per-session generation; a new generation
+revokes prior evidence and aborts active package project SSH, SFTP, and mutation
+leases. The tool internally runs `hostname; whoami; pwd -P` and requires a
+zero-exit, non-truncated, exact three-line result with non-empty hostname/user
+and the canonical launch workdir. A denied, failed, canceled, unhealthy,
+malformed, or mismatched attempt leaves package project tools and root Task
+blocked until a new `remote_status` fully succeeds. Completed remote commits and
+already-admitted upstream Task execution are not retroactively undone. Parent
+evidence is never copied. Package Bash is not a preflight mechanism; built-in
+`explore` cannot use it, although its package `read`, `glob`, and `grep` tools can
+operate after preflight subject to host policy.
 
 Read-only siblings may overlap. Mutation-capable siblings must have disjoint
 path scopes. Package file mutations share one operation-wide mutex in one plugin
@@ -292,7 +295,7 @@ The plugin overrides these familiar OpenCode tools:
 | `bash` | One-shot POSIX `sh` command through the OpenSSH ControlMaster |
 | `glob`, `grep` | Remote command through the ControlMaster |
 | `read`, `write`, `edit`, `apply_patch` | Private local mirror plus system SFTP |
-| `remote_status` | Target and ControlMaster health diagnostics |
+| `remote_status` | Target and ControlMaster health, remote identity validation, and session preflight completion |
 
 Task is intentionally absent from this table because it is local OpenCode
 orchestration, not an SSH-backed project tool.
@@ -306,9 +309,10 @@ sandbox and does not guarantee that every OpenCode operation is remote.
 
 Package preflight rejects project tools before path resolution, baseline reads,
 SSH/SFTP preparation, or their tool-specific permission request.
-Starting `remote_status` or the exact identity Bash advances the session
-generation, invalidates old preflight, and aborts active package project leases;
-`remote_status` asks before its health SSH.
+Starting `remote_status` advances the session generation, invalidates old
+preflight, and aborts active package project leases. Its own permission is
+requested before the internal fixed `hostname; whoami; pwd -P` SSH command; no
+separate preflight `bash` permission or Bash tool call occurs.
 Once preflight is complete, path canonicalization can use SSH before the
 `bash`, `read`, `glob`, or `grep` prompt; write, edit, and patch also pull current
 content before the `edit` prompt so OpenCode can present a diff. A lexical path
@@ -471,15 +475,15 @@ passing with zero failed, skipped, or todo scenarios. Final evidence recorded on
 2026-08-28 is:
 
 - `npm run lint` passed, and `npm run build` passed repeatedly.
-- The actual installed OpenCode 1.18.23 self-test passed with runtime source
-  `client._client.get`; Task resume was disabled.
+- The actual installed OpenCode 1.18.25 self-test passed; Task resume was
+  disabled.
 - The focused merged diagnostics/lifecycle gate passed 100/100.
 - The complete installed-loader gate passed 3/3 with zero skips. Its actual
   target-free self-test held valid health decoys on every resolved localhost
   loopback address at port 4096, saw zero connections and requests, and observed
   `client._client.get`. Real-serve production activation/disposal and correlated
   startup logs also passed.
-- Ordinary installed OpenCode 1.18.23 passed all 6/6 Task scenarios. Resume was
+- Ordinary installed OpenCode 1.18.25 passed all 6/6 Task scenarios. Resume was
   disabled, every `task_id` was rejected before upstream execution, and the
   fresh-Task fallback passed.
 - The exact baseline binary
@@ -490,10 +494,12 @@ passing with zero failed, skipped, or todo scenarios. Final evidence recorded on
 - The exact sixth scenario took `task_id` from the root model-visible Task
   result, cross-checked the actual direct child, proved the identical package
   write was blocked before renewed preflight with zero SSH/SFTP preparation,
-  then repeated preflight and completed atomic fake-SFTP get, private put, and
-  `mv -fT --` with the expected final content.
-- `npm test` passed 32 unit/integration files and 459/459 tests, then 2 smoke
-  files/tests passed 2/2. A separate `npm run test:smoke` passed 2/2.
+  then completed one renewed `remote_status` and atomic fake-SFTP get, private
+  put, and `mv -fT --` with the expected final content.
+- Every automated root, child, and resumed-child preflight used one
+  `remote_status` SSH identity command and no separate Bash preflight.
+- `npm test` passed 32 unit/integration files and 453/453 tests, then 2 smoke
+  files/tests passed 2/2.
 - `npm pack --dry-run` passed with 166 files listed, and `git diff --check`
   passed.
 - The actual installed-loader integration used a real OpenCode serve process on

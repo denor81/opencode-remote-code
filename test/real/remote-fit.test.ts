@@ -9,11 +9,7 @@ import { PathMapper } from "../../src/path-mapper.js"
 import { RemotePathResolver } from "../../src/remote-path-resolver.js"
 import { createLaunchPaths, createRuntimePaths } from "../../src/runtime-paths.js"
 import { quoteShell } from "../../src/shell-quote.js"
-import {
-  IDENTITY_COMMAND,
-  SessionSafety,
-  guardProjectTool,
-} from "../../src/session-safety.js"
+import { SessionSafety, guardProjectTool } from "../../src/session-safety.js"
 import { createSSHPool } from "../../src/ssh-pool.js"
 import { SshClient } from "../../src/ssh/client.js"
 import { ControlMaster } from "../../src/ssh/control-master.js"
@@ -141,15 +137,11 @@ describe("opt-in real SSH fit", () => {
             sessionSafety.recordStatusResult(sessionID, attempt, result)
         )
 
-        expect(output(await status.execute({}, ctx))).toContain('"controlMaster": "healthy"')
-        expect(
-          output(
-            await bash.execute(
-              { command: IDENTITY_COMMAND, description: "real fit identity" },
-              ctx
-            )
-          )
-        ).toContain(canonicalWorkdir)
+        const statusOutput = output(await status.execute({}, ctx))
+        expect(statusOutput).toContain('"controlMaster": "healthy"')
+        expect(statusOutput).toContain('"hostname":')
+        expect(statusOutput).toContain('"user":')
+        expect(statusOutput).toContain(`"workdir": ${JSON.stringify(canonicalWorkdir)}`)
         expect(
           output(
             await bash.execute(

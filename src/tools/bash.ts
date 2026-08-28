@@ -8,11 +8,10 @@ import { publishToolMetadata } from "../opencode-metadata.js"
 import type { RemotePathResolver } from "../remote-path-resolver.js"
 import type {
   BashExecutionAdmission,
-  IdentityAttemptToken,
   ProjectAdmissionToken,
 } from "../session-safety.js"
 import type { SSHPool } from "../ssh-pool.js"
-import { SshClientError, type RemoteCommandResult } from "../ssh/client.js"
+import { SshClientError } from "../ssh/client.js"
 
 const MAX_METADATA_LENGTH = 30_000
 const METADATA_UPDATE_INTERVAL_MS = 100
@@ -23,11 +22,6 @@ export interface BashSafety {
     command: string,
     workdir?: string
   ): BashExecutionAdmission
-  completeIdentity(
-    sessionID: string,
-    attempt: IdentityAttemptToken,
-    result: RemoteCommandResult
-  ): void
   revalidateProject(
     sessionID: string,
     admission: ProjectAdmissionToken
@@ -57,10 +51,12 @@ export function createBashTool(
       const sessionID = ctx.sessionID
       const admission = safety.beforeBash(ctx, args.command, args.workdir)
       try {
-        const executionContext =
-          admission.kind === "project"
-            ? projectContext(ctx, safety, sessionID, admission.admission)
-            : ctx
+        const executionContext = projectContext(
+          ctx,
+          safety,
+          sessionID,
+          admission.admission
+        )
         const timeout = args.timeout ?? 120_000
         if (timeout < 0) {
           throw new Error("Timeout must be a non-negative number")
@@ -135,9 +131,7 @@ export function createBashTool(
         }
 
         await publisher.publishInitial(runningUpdate())
-        if (admission.kind === "project") {
-          safety.revalidateProject(sessionID, admission.admission)
-        }
+        safety.revalidateProject(sessionID, admission.admission)
         let result
         try {
           result = await sshPool.exec(args.command, {
@@ -174,11 +168,6 @@ export function createBashTool(
         const finalMetadata = settlementMetadata(result)
         await publisher.settle({ title, metadata: finalMetadata })
 
-        if (admission.kind === "identity") {
-          throwIfAborted(ctx.abort, "identity preflight")
-          safety.completeIdentity(sessionID, admission.attempt, result)
-        }
-
         if (result.exitCode !== 0) {
           const parts: string[] = []
           if (stdout.trim()) parts.push(stdout)
@@ -206,20 +195,10 @@ export function createBashTool(
           metadata: finalMetadata,
         }
       } finally {
-        if (admission.kind === "project") {
-          safety.releaseProject(sessionID, admission.admission)
-        }
+        safety.releaseProject(sessionID, admission.admission)
       }
     },
   })
-}
-
-function throwIfAborted(signal: AbortSignal, activity: string): void {
-  if (!signal.aborted) return
-  if (signal.reason instanceof Error) throw signal.reason
-  const error = new Error(`OpenCode SSH ${activity} was aborted before completion`)
-  error.name = "AbortError"
-  throw error
 }
 
 function projectContext(

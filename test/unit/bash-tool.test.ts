@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest"
 import type { ProcessResult } from "../../src/process.js"
 import type { RemotePathResolver } from "../../src/remote-path-resolver.js"
 import {
-  IDENTITY_COMMAND,
   SessionSafety,
   type ProjectAdmissionToken,
 } from "../../src/session-safety.js"
@@ -405,7 +404,6 @@ describe("remote bash tool", () => {
         { resolveExisting } as unknown as RemotePathResolver,
         {
           beforeBash,
-          completeIdentity: vi.fn(),
           revalidateProject: vi.fn(),
           projectSignal: vi.fn(() => new AbortController().signal),
           releaseProject: vi.fn(),
@@ -419,58 +417,9 @@ describe("remote bash tool", () => {
     expect(beforeBash).toHaveBeenCalledWith(ctx, "pwd", undefined)
   })
 
-  it("rejects an explicit identity workdir before path, permission, or SSH work", async () => {
-    const safety = new SessionSafety("/srv/project")
-    const statusAttempt = safety.beginStatusCheck("session")
-    safety.recordStatusResult("session", statusAttempt, result())
-    const resolveExisting = vi.fn(async () => "/srv/project")
-    const ask = vi.fn(async () => undefined)
-    const exec = vi.fn(async () => result())
-    const ctx = context([])
-    ctx.ask = ask
-
-    await expect(
-      createBashTool(
-        { exec } as unknown as SSHPool,
-        "/srv/project",
-        { resolveExisting } as unknown as RemotePathResolver,
-        safety
-      ).execute(
-        {
-          command: IDENTITY_COMMAND,
-          description: "Identity with explicit root",
-          workdir: "/srv/project",
-        },
-        ctx
-      )
-    ).rejects.toThrow(/identity preflight.*explicit workdir/i)
-
-    expect(resolveExisting).not.toHaveBeenCalled()
-    expect(ask).not.toHaveBeenCalled()
-    expect(exec).not.toHaveBeenCalled()
-    expect(() =>
-      safety.beforeBash(
-        { sessionID: "session", agent: "build" },
-        IDENTITY_COMMAND
-      )
-    ).toThrow(/remote_status/i)
-  })
-
   it("retains explicit custom workdir behavior after preflight", async () => {
     const safety = new SessionSafety("/srv/project")
-    const statusAttempt = safety.beginStatusCheck("session")
-    safety.recordStatusResult("session", statusAttempt, result())
-    const admission = safety.beforeBash(
-      { sessionID: "session", agent: "build" },
-      IDENTITY_COMMAND
-    )
-    expect(admission.kind).toBe("identity")
-    if (admission.kind !== "identity") throw new Error("Expected identity admission")
-    safety.completeIdentity(
-      "session",
-      admission.attempt,
-      result({ stdout: "remote-host\nremote-user\n/srv/project\n" })
-    )
+    completeSessionPreflight(safety)
     const resolveExisting = vi.fn(
       async (_path: string, _context: ToolContext) => "/srv/custom"
     )
@@ -510,20 +459,7 @@ describe("remote bash tool", () => {
 
   it("does not start project SSH when delayed approval crosses a newer status epoch", async () => {
     const safety = new SessionSafety("/srv/project")
-    const statusAttempt = safety.beginStatusCheck("session")
-    safety.recordStatusResult("session", statusAttempt, result())
-    const identityAdmission = safety.beforeBash(
-      { sessionID: "session", agent: "build" },
-      IDENTITY_COMMAND
-    )
-    if (identityAdmission.kind !== "identity") {
-      throw new Error("Expected identity admission")
-    }
-    safety.completeIdentity(
-      "session",
-      identityAdmission.attempt,
-      result({ stdout: "remote-host\nremote-user\n/srv/project\n" })
-    )
+    completeSessionPreflight(safety)
     const askStarted = deferred()
     const releaseAsk = deferred()
     const exec = vi.fn(async () => result())
@@ -597,109 +533,6 @@ describe("remote bash tool", () => {
     expect(laterExec).toHaveBeenCalledOnce()
   })
 
-  it("requires fresh status when identity permission is denied after admission", async () => {
-    const safety = new SessionSafety("/srv/project")
-    const statusAttempt = safety.beginStatusCheck("session")
-    safety.recordStatusResult("session", statusAttempt, result())
-    const rejection = new Error("identity Bash denied")
-    const ctx = context([])
-    ctx.ask = vi.fn(async () => {
-      throw rejection
-    })
-
-    await expect(
-      createBashTool(
-        { exec: vi.fn(async () => result()) } as unknown as SSHPool,
-        "/srv/project",
-        resolver(),
-        safety
-      ).execute(
-        { command: IDENTITY_COMMAND, description: "Identity" },
-        ctx
-      )
-    ).rejects.toBe(rejection)
-
-    expect(() =>
-      safety.beforeBash(
-        { sessionID: "session", agent: "build" },
-        IDENTITY_COMMAND
-      )
-    ).toThrow(/remote_status/i)
-  })
-
-  it("rejects a delayed identity completion after clearSession", async () => {
-    const safety = new SessionSafety("/srv/project")
-    const statusAttempt = safety.beginStatusCheck("session")
-    safety.recordStatusResult("session", statusAttempt, result())
-    const started = deferred()
-    const release = deferred()
-    const execution = createBashTool(
-      poolFor(async () => {
-        started.resolve()
-        await release.promise
-        return result({ stdout: "remote-host\nremote-user\n/srv/project\n" })
-      }),
-      "/srv/project",
-      resolver(),
-      safety
-    ).execute(
-      { command: IDENTITY_COMMAND, description: "Identity" },
-      context([])
-    )
-
-    await started.promise
-    safety.clearSession("session")
-    release.resolve()
-
-    await expect(execution).rejects.toThrow(/stale|superseded/i)
-    expect(() => safety.requirePreflight("session")).toThrow(/preflight/i)
-  })
-
-  it("does not commit identity when abort occurs during metadata settlement", async () => {
-    const safety = new SessionSafety("/srv/project")
-    const statusAttempt = safety.beginStatusCheck("session")
-    safety.recordStatusResult("session", statusAttempt, result())
-    const controller = new AbortController()
-    const settlementStarted = deferred()
-    const releaseSettlement = deferred()
-    let publication = 0
-    const ctx = context([])
-    ctx.abort = controller.signal
-    ctx.metadata = vi.fn(() => {
-      publication++
-      if (publication === 2) {
-        return Effect.promise(async () => {
-          settlementStarted.resolve()
-          await releaseSettlement.promise
-        })
-      }
-      return Effect.void
-    })
-    const execution = createBashTool(
-      poolFor(async () =>
-        result({ stdout: "remote-host\nremote-user\n/srv/project\n" })
-      ),
-      "/srv/project",
-      resolver(),
-      safety
-    ).execute(
-      { command: IDENTITY_COMMAND, description: "Identity" },
-      ctx
-    )
-
-    await settlementStarted.promise
-    controller.abort()
-    releaseSettlement.resolve()
-
-    await expect(execution).rejects.toMatchObject({ name: "AbortError" })
-    expect(() => safety.requirePreflight("session")).toThrow(/preflight/i)
-    expect(() =>
-      safety.beforeBash(
-        { sessionID: "session", agent: "build" },
-        IDENTITY_COMMAND
-      )
-    ).toThrow(/remote_status/i)
-  })
 })
 
 type MetadataUpdate = Parameters<ToolContext["metadata"]>[0]
@@ -761,7 +594,6 @@ function unrestrictedSafety(): BashSafety {
       kind: "project",
       admission: {} as ProjectAdmissionToken,
     }),
-    completeIdentity: () => {},
     revalidateProject: () => {},
     projectSignal: () => new AbortController().signal,
     releaseProject: () => {},
@@ -770,17 +602,9 @@ function unrestrictedSafety(): BashSafety {
 
 function completeSessionPreflight(safety: SessionSafety): void {
   const statusAttempt = safety.beginStatusCheck("session")
-  safety.recordStatusResult("session", statusAttempt, result())
-  const admission = safety.beforeBash(
-    { sessionID: "session", agent: "build" },
-    IDENTITY_COMMAND
-  )
-  if (admission.kind !== "identity") {
-    throw new Error("Expected identity admission")
-  }
-  safety.completeIdentity(
+  safety.recordStatusResult(
     "session",
-    admission.attempt,
+    statusAttempt,
     result({ stdout: "remote-host\nremote-user\n/srv/project\n" })
   )
 }

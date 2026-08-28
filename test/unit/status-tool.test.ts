@@ -30,7 +30,10 @@ describe("remote status tool", () => {
       order.push("begin")
       return STATUS_ATTEMPT
     })
-    const recordStatusResult = vi.fn(() => order.push("record"))
+    const recordStatusResult = vi.fn(() => {
+      order.push("record")
+      return identity()
+    })
     await createStatusTool(
       fixture,
       pool(exec),
@@ -57,7 +60,7 @@ describe("remote status tool", () => {
         connectionId: fixture.targetID,
       },
     })
-    expect(exec).toHaveBeenCalledWith("true", {
+    expect(exec).toHaveBeenCalledWith(IDENTITY_COMMAND, {
       cwd: fixture.remoteWorkdir,
       timeout: 5_000,
       signal: expect.any(AbortSignal),
@@ -103,7 +106,7 @@ describe("remote status tool", () => {
   })
 
   it("reports every completed unhealthy result to the state transition", async () => {
-    const recordStatusResult = vi.fn()
+    const recordStatusResult = vi.fn(() => null)
     const unhealthy = result({ exitCode: 1 })
     const response = await createStatusTool(
       config(),
@@ -260,7 +263,7 @@ describe("remote status tool", () => {
     expect(() =>
       safety.beforeBash(
         { sessionID: "session", agent: "build" },
-        IDENTITY_COMMAND
+        "printf blocked"
       )
     ).toThrow(/remote_status/i)
   })
@@ -324,7 +327,7 @@ describe("remote status tool", () => {
       pool(exec),
       () => subagentPolicy,
       vi.fn(() => STATUS_ATTEMPT),
-      vi.fn()
+      vi.fn(() => identity())
     ).execute({}, context(vi.fn(async () => undefined)))
 
     const expectedStatus = {
@@ -333,6 +336,7 @@ describe("remote status tool", () => {
       remoteWorkdir: fixture.remoteWorkdir,
       connectionId: fixture.targetID,
       controlMaster: "healthy",
+      identity: identity(),
       subagentPolicy,
     }
     expect(response).toEqual({
@@ -392,7 +396,7 @@ function pool(exec: SSHPool["exec"]): SSHPool {
 
 function result(overrides: Partial<RemoteCommandResult> = {}): RemoteCommandResult {
   return {
-    stdout: "",
+    stdout: `remote-host\nremote-user\n${config().remoteWorkdir}\n`,
     stderr: "",
     exitCode: 0,
     signal: null,
@@ -406,20 +410,15 @@ function completedSafety(): SessionSafety {
   const safety = new SessionSafety(config().remoteWorkdir)
   const statusAttempt = safety.beginStatusCheck("session")
   safety.recordStatusResult("session", statusAttempt, result())
-  const admission = safety.beforeBash(
-    { sessionID: "session", agent: "build" },
-    IDENTITY_COMMAND
-  )
-  expect(admission.kind).toBe("identity")
-  if (admission.kind !== "identity") throw new Error("Expected identity admission")
-  safety.completeIdentity(
-    "session",
-    admission.attempt,
-    result({
-      stdout: `remote-host\nremote-user\n${config().remoteWorkdir}\n`,
-    })
-  )
   return safety
+}
+
+function identity() {
+  return Object.freeze({
+    hostname: "remote-host",
+    user: "remote-user",
+    workdir: config().remoteWorkdir,
+  })
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {

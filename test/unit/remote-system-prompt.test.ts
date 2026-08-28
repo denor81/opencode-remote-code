@@ -25,6 +25,7 @@ describe("remote system context", () => {
         "- Remote git repository: yes",
         "- Connection ID: target-123",
         "- bash, read, write, edit, glob, grep, and apply_patch operate on this SSH target.",
+        "- Package remote_status internally runs and validates hostname; whoami; pwd -P in the remote workspace and completes this session's preflight.",
         "- Other OpenCode tools, plugins, MCP servers, LSP, formatters, and TUI APIs may remain local.",
         "- The remote workspace is the default directory, not a privilege boundary. Paths outside it require permission.",
         "- Each bash call is a separate remote shell. A cd command does not persist into later calls.",
@@ -46,7 +47,7 @@ describe("remote system context", () => {
       "Task resume is limited to the exact task_id of a successfully completed foreground direct child created by this root during this launch."
     )
     expect(context).toContain(
-      "A resumed child must repeat package remote_status and the exact identity Bash preflight before project tools."
+      "A resumed child must repeat the one-step package remote_status preflight before project tools."
     )
     expect(context).not.toContain("Task resume is disabled")
   })

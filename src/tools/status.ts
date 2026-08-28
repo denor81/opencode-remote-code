@@ -1,6 +1,10 @@
 import { tool, type ToolDefinition } from "@opencode-ai/plugin"
 import type { RemoteConfig } from "../config.js"
-import type { StatusAttemptToken } from "../session-safety.js"
+import {
+  IDENTITY_COMMAND,
+  type RemoteIdentity,
+  type StatusAttemptToken,
+} from "../session-safety.js"
 import type { SSHPool } from "../ssh-pool.js"
 import type { RemoteCommandResult } from "../ssh/client.js"
 import type { SubagentPolicy } from "../subagent-policy.js"
@@ -14,10 +18,11 @@ export function createStatusTool(
     sessionID: string,
     attempt: StatusAttemptToken,
     result: RemoteCommandResult
-  ) => void
+  ) => RemoteIdentity | null
 ): ToolDefinition {
   return tool({
-    description: "Report the active OpenCode SSH target and connection health.",
+    description:
+      "Verify the active OpenCode SSH target, remote identity, and session preflight.",
     args: {},
     async execute(_args, ctx) {
       const attempt = beginStatusCheck(ctx.sessionID)
@@ -33,20 +38,21 @@ export function createStatusTool(
           connectionId: config.targetID,
         },
       })
-      const health = await sshPool.exec("true", {
+      const preflight = await sshPool.exec(IDENTITY_COMMAND, {
         cwd: config.remoteWorkdir,
         timeout: 5_000,
         signal: ctx.abort,
       })
       throwIfAborted(ctx.abort)
-      // Only a completed SSH invocation can restore status after the begin transition.
-      recordStatusResult(ctx.sessionID, attempt, health)
+      // Only a completed, validated SSH invocation can restore preflight.
+      const identity = recordStatusResult(ctx.sessionID, attempt, preflight)
       const status = {
         executor: "ssh",
         targetAlias: config.alias,
         remoteWorkdir: config.remoteWorkdir,
         connectionId: config.targetID,
-        controlMaster: health.exitCode === 0 ? "healthy" : "unhealthy",
+        controlMaster: preflight.exitCode === 0 ? "healthy" : "unhealthy",
+        ...(identity === null ? {} : { identity }),
         subagentPolicy,
       }
       return {

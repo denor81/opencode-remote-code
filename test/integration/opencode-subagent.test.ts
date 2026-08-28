@@ -46,7 +46,6 @@ const CUSTOM_AGENT = "task3-custom"
 const CANCELLATION_AGENT = "task3-cancellation"
 const CUSTOM_AGENT_PROMPT = "TASK3_CUSTOM_AGENT_PROMPT_MARKER"
 const IDENTITY_COMMAND = "hostname; whoami; pwd -P"
-const IDENTITY_OUTPUT = `task3-remote-host\ntask3-remote-user\n${TASK_FIXTURE_WORKDIR}\n`
 const ROOT_VERIFY_COMMAND = "printf TASK3_ROOT_FINAL_VERIFICATION"
 const ROOT_VERIFY_OUTPUT = "TASK3_ROOT_FINAL_VERIFIED\n"
 const LONG_COMMANDS = {
@@ -206,18 +205,17 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
           targetAlias: TASK_FIXTURE_ALIAS,
           remoteWorkdir: TASK_FIXTURE_WORKDIR,
           controlMaster: "healthy",
+          identity: {
+            hostname: "task3-remote-host",
+            user: "task3-remote-user",
+            workdir: TASK_FIXTURE_WORKDIR,
+          },
         })
         expect(JSON.parse(statusPart.state.output)).toMatchObject({
           executor: "ssh",
           controlMaster: "healthy",
         })
 
-        const childIdentity = completedToolWithCommand(
-          childMessages,
-          "bash",
-          IDENTITY_COMMAND
-        )
-        expect(childIdentity.state.output).toBe(IDENTITY_OUTPUT)
         const bashPart = completedToolWithCommand(
           childMessages,
           "bash",
@@ -233,15 +231,13 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         const requests = fixture.provider.requests
         expect(requests.map((request) => request.matchedStep)).toEqual([
           "single root calls remote_status",
-          "single root calls identity Bash",
           "root calls Task",
           "child calls remote_status",
-          "child calls identity Bash",
           "child calls SSH-backed Bash",
           "child completes",
           "root completes",
         ])
-        expect(requests).toHaveLength(8)
+        expect(requests).toHaveLength(6)
         for (const request of requests) {
           expect(request.headers.authorization).toBe("Bearer fixture-api-key")
         }
@@ -249,7 +245,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         const rootRequests = requests.filter(
           (request) => request.headers["x-parent-session-id"] === undefined
         )
-        expect(rootRequests).toHaveLength(4)
+        expect(rootRequests).toHaveLength(3)
         for (const request of rootRequests) {
           expect(request.headers["x-session-affinity"]).toBe(root.id)
           expect(request.headers["x-session-id"]).toBe(root.id)
@@ -261,7 +257,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         const childRequests = requests.filter(
           (request) => request.headers["x-parent-session-id"] === root.id
         )
-        expect(childRequests).toHaveLength(4)
+        expect(childRequests).toHaveLength(3)
         for (const request of childRequests) {
           expect(request.headers["x-session-affinity"]).toBe(child.id)
           expect(request.headers["x-session-id"]).toBe(child.id)
@@ -273,7 +269,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
 
           const tools = providerTools(request)
           expect(tools.get("remote_status")?.description).toContain(
-            "Report the active OpenCode SSH target"
+            "Verify the active OpenCode SSH target"
           )
           expect(tools.get("bash")?.description).toContain(
             "one-shot POSIX shell on the remote machine"
@@ -282,8 +278,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         }
 
         await assertSshScenario(fixture, [
-          [sshInput("true"), 2],
-          [realpathInput(), 3],
+          [realpathInput(), 1],
           [sshInput(IDENTITY_COMMAND), 2],
           [sshInput(`printf ${LOCAL_EXECUTION_CANARY}`), 1],
         ])
@@ -310,10 +305,6 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         steps: script.steps,
         configOverride: task3Config(7),
         extraSshResponses: [
-          {
-            input: sshInput(IDENTITY_COMMAND),
-            stdout: IDENTITY_OUTPUT,
-          },
           {
             input: sshInput(ROOT_VERIFY_COMMAND),
             stdout: ROOT_VERIFY_OUTPUT,
@@ -374,12 +365,10 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
               taskPrimaryOnly: true,
             },
           })
-          const identity = completedToolWithCommand(messages, "bash", IDENTITY_COMMAND)
-          expect(identity.state.output).toBe(IDENTITY_OUTPUT)
         }
 
         const childRequests = fixture.provider.requests.filter(hasParentHeader)
-        expect(childRequests).toHaveLength(6)
+        expect(childRequests).toHaveLength(4)
         expect(
           new Set(childRequests.map((request) => request.headers["x-session-id"]))
         ).toEqual(new Set(children.map((child) => child.id)))
@@ -402,8 +391,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         }
 
         await assertSshScenario(fixture, [
-          [sshInput("true"), 3],
-          [realpathInput(), 4],
+          [realpathInput(), 1],
           [sshInput(IDENTITY_COMMAND), 3],
           [sshInput(ROOT_VERIFY_COMMAND), 1],
         ])
@@ -453,7 +441,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         })
         expect(await sessionChildren(fixture, child.id)).toEqual([])
         const requests = fixture.provider.requests.filter(hasParentHeader)
-        expect(requests).toHaveLength(3)
+        expect(requests).toHaveLength(2)
         expect(providerTools(requests[0]).has("remote_status")).toBe(true)
         expect(providerTools(requests[0]).has("read")).toBe(false)
         const childSystem = systemPrompt(requests[0])
@@ -470,13 +458,8 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         )
         expect(toolParts(childMessages).map((part) => part.tool)).toEqual([
           "remote_status",
-          "bash",
         ])
-        await assertSshScenario(fixture, [
-          [sshInput("true"), 2],
-          [realpathInput(), 2],
-          [sshInput(IDENTITY_COMMAND), 2],
-        ])
+        await assertSshScenario(fixture, [[sshInput(IDENTITY_COMMAND), 2]])
       } catch (error) {
         scenarioError = error
       }
@@ -519,7 +502,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         const rootRequests = fixture.provider.requests.filter(
           (request) => !hasParentHeader(request)
         )
-        expect(rootRequests).toHaveLength(4)
+        expect(rootRequests).toHaveLength(3)
         expect(providerTools(rootRequests[0]).has("task")).toBe(true)
         const messages = await sessionMessages(fixture, root.id)
         const task = toolParts(messages).find((part) => part.tool === "task")
@@ -527,11 +510,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         expect(task?.state.status === "error" ? task.state.error : "").toContain(
           "Subagent depth limit reached (0)"
         )
-        await assertSshScenario(fixture, [
-          [sshInput("true"), 1],
-          [realpathInput(), 1],
-          [sshInput(IDENTITY_COMMAND), 1],
-        ])
+        await assertSshScenario(fixture, [[sshInput(IDENTITY_COMMAND), 1]])
       } catch (error) {
         scenarioError = error
       }
@@ -554,7 +533,6 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         steps: script.steps,
         configOverride: task3Config(7),
         extraSshResponses: [
-          { input: sshInput(IDENTITY_COMMAND), stdout: IDENTITY_OUTPUT },
           ...Object.values(LONG_COMMANDS).map((command) => ({
             input: sshInput(command),
             delayMs: 60_000,
@@ -621,9 +599,6 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
             executor: "ssh",
             controlMaster: "healthy",
           })
-          expect(completedToolWithCommand(messages, "bash", IDENTITY_COMMAND).state.output).toBe(
-            IDENTITY_OUTPUT
-          )
           const kind: ChildKind =
             child.agent === CANCELLATION_AGENT ? "explore" : "custom"
           const longParts = toolParts(messages).filter(
@@ -654,14 +629,13 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
           )
         ).toBe(false)
         await assertSshScenario(fixture, [
-          [sshInput("true"), 3],
-          [realpathInput(), 5],
+          [realpathInput(), 2],
           [sshInput(IDENTITY_COMMAND), 3],
           [sshInput(LONG_COMMANDS.explore), 1],
           [sshInput(LONG_COMMANDS.custom), 1],
         ])
         expect(script.barrier.releaseArrivalCounts).toEqual([2, 2])
-        expect(fixture.provider.requests).toHaveLength(10)
+        expect(fixture.provider.requests).toHaveLength(7)
       } catch (error) {
         scenarioError = error
       }
@@ -785,13 +759,6 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
           executor: "ssh",
           controlMaster: "healthy",
         })
-        expect(
-          completedToolWithCommand(
-            rootMessages,
-            "bash",
-            IDENTITY_COMMAND
-          ).state.output
-        ).toBe(IDENTITY_OUTPUT)
         const rootTasks = toolParts(rootMessages).filter(
           (part) => part.tool === "task"
         )
@@ -849,7 +816,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
         const requests = fixture.provider.requests
         const rootRequests = requests.filter((request) => !hasParentHeader(request))
         const childRequests = requests.filter(hasParentHeader)
-        expect(rootRequests).toHaveLength(expectedTaskResumeEnabled ? 5 : 6)
+        expect(rootRequests).toHaveLength(expectedTaskResumeEnabled ? 4 : 5)
         for (const request of requests) {
           assertResumeGuidance(request, expectedTaskResumeEnabled)
         }
@@ -878,13 +845,13 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
             )
           ).toEqual([child.id, child.id])
 
-          expect(initialChildRequests).toHaveLength(8)
+          expect(initialChildRequests).toHaveLength(6)
           const resumedRequests = initialChildRequests.filter((request) =>
             providerMessageTexts(request, "user").some((text) =>
               text.includes(RESUME_CHILD_MARKER)
             )
           )
-          expect(resumedRequests).toHaveLength(5)
+          expect(resumedRequests).toHaveLength(4)
           for (const request of resumedRequests) {
             expect(
               providerMessageTexts(request, "user").some((text) =>
@@ -901,10 +868,8 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
           ).toBe(true)
           expect(toolParts(childMessages).map((part) => part.tool)).toEqual([
             "remote_status",
-            "bash",
             "write",
             "remote_status",
-            "bash",
             "write",
           ])
           const resumedMutations = toolParts(childMessages).filter(
@@ -946,25 +911,17 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
           })
           expect(script.blockedPreflightError).toMatch(/preflight/iu)
           expect(completedToolParts(childMessages, "remote_status")).toHaveLength(2)
-          expect(
-            completedToolParts(childMessages, "bash").filter(
-              (part) => part.state.input.command === IDENTITY_COMMAND
-            )
-          ).toHaveLength(2)
           expect(await fixture.readRemoteFile(RESUME_WRITE_PATH)).toBe(
             RESUME_WRITE_CONTENT
           )
           expect(requests.map((request) => request.matchedStep)).toEqual([
             "resume root calls remote_status",
-            "resume root calls identity Bash",
             "resume root creates fresh Task",
             "fresh resume child calls remote_status",
-            "fresh resume child calls identity Bash",
             "fresh resume child completes",
             "root resumes model-visible Task",
             "resumed child attempts project write before preflight",
             "resumed child observes preflight rejection and repeats remote_status",
-            "resumed child repeats identity Bash",
             "resumed child performs SFTP-backed write",
             "resumed child completes",
             "root completes enabled resume",
@@ -978,7 +935,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
             "Task resume is disabled for the selected OpenCode version"
           )
           expect(script.blockedPreflightError).toBeUndefined()
-          expect(initialChildRequests).toHaveLength(3)
+          expect(initialChildRequests).toHaveLength(2)
           expect(
             childRequests.some((request) =>
               providerMessageTexts(request, "user").some((text) =>
@@ -992,7 +949,6 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
           expect(childText).not.toContain(RESUME_CHILD_TEXT)
           expect(toolParts(childMessages).map((part) => part.tool)).toEqual([
             "remote_status",
-            "bash",
           ])
 
           const fallbackTask = rootTasks[2]
@@ -1030,41 +986,26 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
             executor: "ssh",
             controlMaster: "healthy",
           })
-          expect(
-            completedToolWithCommand(
-              fallbackMessages,
-              "bash",
-              IDENTITY_COMMAND
-            ).state.output
-          ).toBe(IDENTITY_OUTPUT)
           expect(toolParts(fallbackMessages).map((part) => part.tool)).toEqual([
             "remote_status",
-            "bash",
           ])
           expect(
             childRequests.filter(
               (request) => request.headers["x-session-id"] === fallbackChild.id
             )
-          ).toHaveLength(3)
+          ).toHaveLength(2)
           expect(requests.map((request) => request.matchedStep)).toEqual([
             "resume root calls remote_status",
-            "resume root calls identity Bash",
             "resume root creates fresh Task",
             "fresh resume child calls remote_status",
-            "fresh resume child calls identity Bash",
             "fresh resume child completes",
             "root resumes model-visible Task",
             "root starts fresh Task after disabled resume",
             "fresh fallback child calls remote_status",
-            "fresh fallback child calls identity Bash",
             "fresh fallback child completes",
             "root records disabled resume and fresh fallback",
           ])
-          await assertSshScenario(fixture, [
-            [sshInput("true"), 3],
-            [realpathInput(), 3],
-            [sshInput(IDENTITY_COMMAND), 3],
-          ])
+          await assertSshScenario(fixture, [[sshInput(IDENTITY_COMMAND), 3]])
         }
       } catch (error) {
         scenarioError = error
@@ -1076,7 +1017,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
 })
 
 function providerScript(): ScriptedProviderStep[] {
-  const rootIdentityID = "call_single_root_identity"
+  const rootStatusID = "call_single_root_status"
   return [
     ...rootPreflightProviderSteps(ROOT_PROMPT, "single"),
     {
@@ -1085,17 +1026,14 @@ function providerScript(): ScriptedProviderStep[] {
         request.headers["x-parent-session-id"] === undefined &&
         providerTools(request).has("task") &&
         requestBodyContains(request, ROOT_PROMPT) &&
-        requestBodyContains(request, rootIdentityID),
+        requestBodyContains(request, rootStatusID),
       response: {
         type: "tool-call",
         id: "call_root_task",
         name: "task",
         arguments: {
           description: "Verify remote canary",
-          prompt:
-            `Call remote_status, then call bash with exactly ${JSON.stringify(
-              IDENTITY_COMMAND
-            )}, then call bash with exactly \"printf ${LOCAL_EXECUTION_CANARY}\" and report the result.`,
+          prompt: `Call remote_status, then call bash with exactly \"printf ${LOCAL_EXECUTION_CANARY}\" and report the result.`,
           subagent_type: "general",
         },
       },
@@ -1112,26 +1050,10 @@ function providerScript(): ScriptedProviderStep[] {
       },
     },
     {
-      name: "child calls identity Bash",
-      match: (request) =>
-        hasParentHeader(request) &&
-        requestBodyContains(request, "call_child_status") &&
-        !requestBodyContains(request, "call_child_identity"),
-      response: {
-        type: "tool-call",
-        id: "call_child_identity",
-        name: "bash",
-        arguments: {
-          command: IDENTITY_COMMAND,
-          description: "Verify remote identity",
-        },
-      },
-    },
-    {
       name: "child calls SSH-backed Bash",
       match: (request) =>
         hasParentHeader(request) &&
-        requestBodyContains(request, "call_child_identity") &&
+        requestBodyContains(request, "call_child_status") &&
         !requestBodyContains(request, "call_child_bash"),
       response: {
         type: "tool-call",
@@ -1171,7 +1093,7 @@ function siblingProviderScript(mode: "complete" | "cancel"): {
 } {
   const barrier = childRequestBarrier()
   const prompt = mode === "complete" ? SIBLING_ROOT_PROMPT : CANCELLATION_ROOT_PROMPT
-  const rootIdentityID = `call_${mode}_root_identity`
+  const rootStatusID = `call_${mode}_root_status`
   const steps: ScriptedProviderStep[] = [
     ...rootPreflightProviderSteps(prompt, mode),
     {
@@ -1180,7 +1102,7 @@ function siblingProviderScript(mode: "complete" | "cancel"): {
         !hasParentHeader(request) &&
         providerTools(request).has("task") &&
         requestBodyContains(request, prompt) &&
-        requestBodyContains(request, rootIdentityID),
+        requestBodyContains(request, rootStatusID),
       response: {
         type: "tool-calls",
         calls: [
@@ -1209,42 +1131,22 @@ function siblingProviderScript(mode: "complete" | "cancel"): {
 
   for (const kind of ["explore", "custom"] as const) {
     const statusID = `call_task3_${kind}_status`
-    const identityID = `call_task3_${kind}_identity`
-    steps.push(
-      {
-        name: `${mode} ${kind} child calls remote_status after sibling barrier`,
-        match: (request) =>
-          hasParentHeader(request) &&
-          childKind(request) === kind &&
-          !requestBodyContains(request, statusID),
-        response: async () => {
-          await barrier.arrive(kind)
-          return {
-            type: "tool-call",
-            id: statusID,
-            name: "remote_status",
-            arguments: {},
-          }
-        },
-      },
-      {
-        name: `${mode} ${kind} child calls identity Bash`,
-        match: (request) =>
-          hasParentHeader(request) &&
-          childKind(request) === kind &&
-          requestBodyContains(request, statusID) &&
-          !requestBodyContains(request, identityID),
-        response: {
+    steps.push({
+      name: `${mode} ${kind} child calls remote_status after sibling barrier`,
+      match: (request) =>
+        hasParentHeader(request) &&
+        childKind(request) === kind &&
+        !requestBodyContains(request, statusID),
+      response: async () => {
+        await barrier.arrive(kind)
+        return {
           type: "tool-call",
-          id: identityID,
-          name: "bash",
-          arguments: {
-            command: IDENTITY_COMMAND,
-            description: "Verify remote identity",
-          },
-        },
-      }
-    )
+          id: statusID,
+          name: "remote_status",
+          arguments: {},
+        }
+      },
+    })
 
     if (mode === "complete") {
       steps.push({
@@ -1252,7 +1154,7 @@ function siblingProviderScript(mode: "complete" | "cancel"): {
         match: (request) =>
           hasParentHeader(request) &&
           childKind(request) === kind &&
-          requestBodyContains(request, identityID),
+          requestBodyContains(request, statusID),
         response: {
           type: "text",
           text: `${kind} child independently verified the remote target.`,
@@ -1264,7 +1166,7 @@ function siblingProviderScript(mode: "complete" | "cancel"): {
         match: (request) =>
           hasParentHeader(request) &&
           childKind(request) === kind &&
-          requestBodyContains(request, identityID),
+          requestBodyContains(request, statusID),
         response: {
           type: "tool-call",
           id: `call_task3_${kind}_long`,
@@ -1320,7 +1222,7 @@ function siblingProviderScript(mode: "complete" | "cancel"): {
 }
 
 function remoteStatusDenyProviderScript(): ScriptedProviderStep[] {
-  const rootIdentityID = "call_deny_root_identity"
+  const rootStatusID = "call_deny_root_status"
   return [
     ...rootPreflightProviderSteps(DENY_ROOT_PROMPT, "deny"),
     {
@@ -1328,7 +1230,7 @@ function remoteStatusDenyProviderScript(): ScriptedProviderStep[] {
       match: (request) =>
         !hasParentHeader(request) &&
         requestBodyContains(request, DENY_ROOT_PROMPT) &&
-        requestBodyContains(request, rootIdentityID),
+        requestBodyContains(request, rootStatusID),
       response: {
         type: "tool-call",
         id: "call_task3_deny_task",
@@ -1336,8 +1238,7 @@ function remoteStatusDenyProviderScript(): ScriptedProviderStep[] {
         arguments: {
           description: "Respect inherited read deny",
           prompt:
-            `${DENY_CHILD_MARKER}. Call remote_status, then call bash with exactly ` +
-            `${JSON.stringify(IDENTITY_COMMAND)}. If read is unavailable after preflight, ` +
+            `${DENY_CHILD_MARKER}. Call remote_status. If read is unavailable after preflight, ` +
             "stop without calling read.",
           subagent_type: "general",
         },
@@ -1357,26 +1258,10 @@ function remoteStatusDenyProviderScript(): ScriptedProviderStep[] {
       },
     },
     {
-      name: "denied child calls identity Bash",
-      match: (request) =>
-        hasParentHeader(request) &&
-        requestBodyContains(request, "call_deny_child_status") &&
-        !requestBodyContains(request, "call_deny_child_identity"),
-      response: {
-        type: "tool-call",
-        id: "call_deny_child_identity",
-        name: "bash",
-        arguments: {
-          command: IDENTITY_COMMAND,
-          description: "Verify remote identity",
-        },
-      },
-    },
-    {
       name: "denied child stops without read",
       match: (request) =>
         hasParentHeader(request) &&
-        requestBodyContains(request, "call_deny_child_identity"),
+        requestBodyContains(request, "call_deny_child_status"),
       response: {
         type: "text",
         text: "Child stopped because read is unavailable.",
@@ -1393,7 +1278,7 @@ function remoteStatusDenyProviderScript(): ScriptedProviderStep[] {
 }
 
 function depthZeroProviderScript(): ScriptedProviderStep[] {
-  const rootIdentityID = "call_depth_zero_root_identity"
+  const rootStatusID = "call_depth_zero_root_status"
   return [
     ...rootPreflightProviderSteps(DEPTH_ZERO_PROMPT, "depth_zero"),
     {
@@ -1401,7 +1286,7 @@ function depthZeroProviderScript(): ScriptedProviderStep[] {
       match: (request) =>
         !hasParentHeader(request) &&
         requestBodyContains(request, DEPTH_ZERO_PROMPT) &&
-        requestBodyContains(request, rootIdentityID),
+        requestBodyContains(request, rootStatusID),
       response: {
         type: "tool-call",
         id: "call_task3_depth_zero",
@@ -1436,15 +1321,12 @@ function resumeProviderScript(callbacks: {
 }): ResumeProviderScript {
   const freshTaskCallID = "call_resume_fresh_task"
   const freshStatusCallID = "call_resume_child_status"
-  const freshIdentityCallID = "call_resume_child_identity"
   const resumeTaskCallID = "call_resume_task"
   const blockedMutationCallID = "call_resumed_child_write_before_preflight"
   const resumedStatusCallID = "call_resumed_child_status"
-  const resumedIdentityCallID = "call_resumed_child_identity"
   const resumedMutationCallID = "call_resumed_child_write"
   const fallbackTaskCallID = "call_resume_fallback_task"
   const fallbackStatusCallID = "call_resume_fallback_status"
-  const fallbackIdentityCallID = "call_resume_fallback_identity"
   let observedChildID: string | undefined
   let modelVisibleTaskID: string | undefined
   let blockedPreflightError: string | undefined
@@ -1472,16 +1354,14 @@ function resumeProviderScript(callbacks: {
           match: (request) =>
             !hasParentHeader(request) &&
             providerMessageContains(request, "user", RESUME_ROOT_PROMPT) &&
-            providerHasToolCall(request, "call_resume_root_identity"),
+            providerHasToolCall(request, "call_resume_root_status"),
           response: {
             type: "tool-call",
             id: freshTaskCallID,
             name: "task",
             arguments: {
               description: "Create resumable child",
-              prompt:
-                `${RESUME_INITIAL_CONTEXT_MARKER}. Call remote_status, then call bash with exactly ` +
-                `${JSON.stringify(IDENTITY_COMMAND)}. Preserve this context and report completion.`,
+              prompt: `${RESUME_INITIAL_CONTEXT_MARKER}. Call remote_status. Preserve this context and report completion.`,
               subagent_type: "general",
             },
           },
@@ -1514,27 +1394,6 @@ function resumeProviderScript(callbacks: {
           },
         },
         {
-          name: "fresh resume child calls identity Bash",
-          match: (request) =>
-            hasParentHeader(request) &&
-            providerMessageContains(
-              request,
-              "user",
-              RESUME_INITIAL_CONTEXT_MARKER
-            ) &&
-            providerHasToolCall(request, freshStatusCallID) &&
-            !providerHasToolCall(request, freshIdentityCallID),
-          response: {
-            type: "tool-call",
-            id: freshIdentityCallID,
-            name: "bash",
-            arguments: {
-              command: IDENTITY_COMMAND,
-              description: "Verify fresh child identity",
-            },
-          },
-        },
-        {
           name: "fresh resume child completes",
           match: (request) =>
             hasParentHeader(request) &&
@@ -1543,7 +1402,7 @@ function resumeProviderScript(callbacks: {
               "user",
               RESUME_INITIAL_CONTEXT_MARKER
             ) &&
-            providerHasToolCall(request, freshIdentityCallID) &&
+            providerHasToolCall(request, freshStatusCallID) &&
             !providerMessageContains(request, "user", RESUME_CHILD_MARKER),
           response: { type: "text", text: RESUME_INITIAL_TEXT },
         },
@@ -1585,8 +1444,7 @@ function resumeProviderScript(callbacks: {
                   `${JSON.stringify(RESUME_WRITE_PATH)} and content ${JSON.stringify(
                     RESUME_WRITE_CONTENT
                   )}, and observe that renewed preflight is required. ` +
-                  "Then call remote_status, call bash with exactly " +
-                  `${JSON.stringify(IDENTITY_COMMAND)}, retry the exact same write, and report completion.`,
+                  "Then call remote_status, retry the exact same write, and report completion.",
                 subagent_type: "general",
                 task_id: extractedTaskID,
               },
@@ -1612,9 +1470,7 @@ function resumeProviderScript(callbacks: {
               name: "task",
               arguments: {
                 description: "Verify fresh Task fallback",
-                prompt:
-                  `${RESUME_FALLBACK_MARKER}. Call remote_status, then call bash with exactly ` +
-                  `${JSON.stringify(IDENTITY_COMMAND)} and report that fresh Task remains available.`,
+                prompt: `${RESUME_FALLBACK_MARKER}. Call remote_status and report that fresh Task remains available.`,
                 subagent_type: "general",
               },
             },
@@ -1633,28 +1489,11 @@ function resumeProviderScript(callbacks: {
             },
           },
           {
-            name: "fresh fallback child calls identity Bash",
-            match: (request) =>
-              hasParentHeader(request) &&
-              providerMessageContains(request, "user", RESUME_FALLBACK_MARKER) &&
-              providerHasToolCall(request, fallbackStatusCallID) &&
-              !providerHasToolCall(request, fallbackIdentityCallID),
-            response: {
-              type: "tool-call",
-              id: fallbackIdentityCallID,
-              name: "bash",
-              arguments: {
-                command: IDENTITY_COMMAND,
-                description: "Verify fresh fallback child identity",
-              },
-            },
-          },
-          {
             name: "fresh fallback child completes",
             match: (request) =>
               hasParentHeader(request) &&
               providerMessageContains(request, "user", RESUME_FALLBACK_MARKER) &&
-              providerHasToolCall(request, fallbackIdentityCallID),
+              providerHasToolCall(request, fallbackStatusCallID),
             response: { type: "text", text: RESUME_FALLBACK_TEXT },
           },
           {
@@ -1716,28 +1555,11 @@ function resumeProviderScript(callbacks: {
           },
         },
         {
-          name: "resumed child repeats identity Bash",
-          match: (request) =>
-            hasParentHeader(request) &&
-            providerMessageContains(request, "user", RESUME_CHILD_MARKER) &&
-            providerHasToolCall(request, resumedStatusCallID) &&
-            !providerHasToolCall(request, resumedIdentityCallID),
-          response: {
-            type: "tool-call",
-            id: resumedIdentityCallID,
-            name: "bash",
-            arguments: {
-              command: IDENTITY_COMMAND,
-              description: "Verify resumed child identity",
-            },
-          },
-        },
-        {
           name: "resumed child performs SFTP-backed write",
           match: (request) =>
             hasParentHeader(request) &&
             providerMessageContains(request, "user", RESUME_CHILD_MARKER) &&
-            providerHasToolCall(request, resumedIdentityCallID) &&
+            providerHasToolCall(request, resumedStatusCallID) &&
             !providerHasToolCall(request, resumedMutationCallID),
           response: {
             type: "tool-call",
@@ -1789,7 +1611,6 @@ function rootPreflightProviderSteps(
   prefix: string
 ): ScriptedProviderStep[] {
   const statusID = `call_${prefix}_root_status`
-  const identityID = `call_${prefix}_root_identity`
   return [
     {
       name: `${prefix} root calls remote_status`,
@@ -1802,22 +1623,6 @@ function rootPreflightProviderSteps(
         id: statusID,
         name: "remote_status",
         arguments: {},
-      },
-    },
-    {
-      name: `${prefix} root calls identity Bash`,
-      match: (request) =>
-        !hasParentHeader(request) &&
-        requestBodyContains(request, statusID) &&
-        !requestBodyContains(request, identityID),
-      response: {
-        type: "tool-call",
-        id: identityID,
-        name: "bash",
-        arguments: {
-          command: IDENTITY_COMMAND,
-          description: "Verify root remote identity",
-        },
       },
     },
   ]
@@ -1856,10 +1661,7 @@ function childPrompt(kind: ChildKind, mode: "complete" | "cancel"): string {
     mode === "complete"
       ? "Report that the remote target was independently verified."
       : `Then call bash with exactly ${JSON.stringify(LONG_COMMANDS[kind])} and wait.`
-  return (
-    `${marker}. Call remote_status first, then call bash with exactly ` +
-    `${JSON.stringify(IDENTITY_COMMAND)}. ${final}`
-  )
+  return `${marker}. Call remote_status first. ${final}`
 }
 
 function task3Config(depth: number): InstalledOpenCodeConfigOverride {
@@ -1925,8 +1727,7 @@ async function assertResumeWriteScenario(
       `git -C ${TASK_FIXTURE_WORKDIR} rev-parse --is-inside-work-tree 2>/dev/null`,
       1,
     ],
-    [sshInput("true"), 3],
-    [realpathInput(), 10],
+    [realpathInput(), 7],
     [`realpath -e -- ${RESUME_WRITE_PATH}`, 7],
     [sshInput(IDENTITY_COMMAND), 3],
     ...parentCommands.map((command) => [command, 1] as const),
@@ -2352,7 +2153,7 @@ function assertResumeGuidance(
       "Task resume is limited to the exact task_id of a successfully completed foreground direct child"
     )
     expect(system).toContain(
-      "A resumed child must repeat package remote_status and the exact identity Bash preflight"
+      "A resumed child must repeat the one-step package remote_status preflight"
     )
     expect(system).not.toContain(
       "Task resume is disabled for the selected OpenCode version"

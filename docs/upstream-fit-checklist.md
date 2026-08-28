@@ -59,14 +59,15 @@ immediately, and the launcher revalidates the nonce-bound marker after 25 ms.
 Ready is not perpetual liveness evidence.
 
 Final verified 2026-08-28 automated evidence is green: lint passed and build
-passed repeatedly; actual installed OpenCode 1.18.23 self-test passed with
-`client._client.get` and resume disabled; ordinary installed OpenCode 1.18.23
+passed repeatedly; actual installed OpenCode 1.18.25 self-test passed with
+resume disabled; ordinary installed OpenCode 1.18.25
 passed 6/6 with resume disabled and fresh fallback. Exact binary
 `/tmp/opencode/opencode-ai-1.18.18/node_modules/.bin/opencode` resolved to
 `/tmp/opencode/opencode-ai-1.18.18/node_modules/opencode-ai/bin/opencode.exe`;
 the exact baseline accepted its six names with 6 passed, 0 failed, 0 skipped, and
-the resume scenario enabled. `npm test` passed 32 unit/integration files and
-459/459 tests, then 2 smoke files/tests passed 2/2; separate smoke passed 2/2;
+the resume scenario enabled. Every automated preflight used one `remote_status`
+SSH identity command and no separate Bash preflight. `npm test` passed 32
+unit/integration files and 453/453 tests, then 2 smoke files/tests passed 2/2;
 `npm pack --dry-run` passed with 166 files; and `git diff --check` passed.
 
 The focused merged diagnostics/lifecycle gate passed 100/100, and the complete
@@ -151,14 +152,16 @@ instead.
 
 Ask the test session to perform these in order:
 
-1. Call `remote_status` and report alias, workdir, connection ID, and health.
-2. Run `hostname; whoami; pwd -P`; verify the remote host and canonical workdir.
-3. If sudo testing is required, run `sudo -n id -u`; expect `0` without a
+1. Call `remote_status` and report alias, workdir, connection ID, health, remote
+   hostname, remote user, and validated identity workdir. Verify that the tool's
+   internal `hostname; whoami; pwd -P` result matches the intended target and
+   canonical workdir, with no separate Bash preflight call.
+2. If sudo testing is required, run `sudo -n id -u`; expect `0` without a
    password prompt.
-4. Create no files yet; list the empty test directory with `read` and `glob`.
-5. Request a read of `/etc/os-release`; verify an external-directory permission
+3. Create no files yet; list the empty test directory with `read` and `glob`.
+4. Request a read of `/etc/os-release`; verify an external-directory permission
    prompt appears before access. Test deny once, then allow on a second request.
-6. Run a normal local Serper/MCP action and verify that integration still works.
+5. Run a normal local Serper/MCP action and verify that integration still works.
 
 ## Disposable Two-Sibling TUI Gate
 
@@ -176,8 +179,9 @@ directory. Do not infer a pass from the loader or ready marker.
 4. For permission-attribution observations, set the exact OpenCode permission
    keys `remote_status`, `bash`, and `edit` to `ask` in a reviewed temporary
    global or per-agent profile. `write` and `apply_patch` request `edit`.
-5. Have the root independently call `remote_status` and run
-   `hostname; whoami; pwd -P` through SSH-backed Bash before delegation.
+5. Have the root independently call `remote_status` before delegation. Verify
+   its embedded hostname/user/workdir result and that no preflight Bash prompt or
+   Bash tool card appears.
 6. Record whether generated OpenCode SSH system context says Task resume is
    enabled or disabled. Do not infer this from ordinary OpenCode behavior.
 7. Create no tracked configuration and restore the temporary local profile after
@@ -193,14 +197,14 @@ must not be treated as approval or preflight evidence for another child.
 1. In a fresh root session, request one package project read and one Task call
    before preflight. Both must be rejected before path preparation, SSH/SFTP, or
    child creation.
-2. Complete root `remote_status` and exact identity Bash. Verify a normal
-   package read now reaches its `read` permission boundary.
+2. Complete one root `remote_status`. Verify a normal package read now reaches
+   its `read` permission boundary.
 3. Call `remote_status` again and deny that new `remote_status` prompt. The
-   attempt must immediately invalidate old status and identity evidence. Verify
-   a package project tool and root Task are both blocked and no health SSH ran
-   for the denied status call.
-4. Complete a new allowed `remote_status` plus exact identity Bash. Verify the
-   root can use package tools again.
+   attempt must immediately invalidate old preflight evidence. Verify a package
+   project tool and root Task are both blocked and no fixed identity SSH command
+   ran for the denied status call.
+4. Complete one new allowed `remote_status`. Verify the root can use package
+   tools again immediately.
 5. In a fresh disposable session, create a session-level `ask` for one matching
    SSH project permission, such as `bash`, then request Task delegation. On
    OpenCode 1.18.18 the package must reject delegation because parent session
@@ -211,7 +215,7 @@ must not be treated as approval or preflight evidence for another child.
    available. Confirm the launched OpenCode environment forces background
    subagents off.
 7. In the hermetic generation test, hold an active package project SSH/SFTP or
-   mutation lease, begin a newer status or identity attempt for that session,
+   mutation lease, begin a newer `remote_status` attempt for that session,
    and verify the lease aborts. Verify the new generation does not claim to undo
    an already completed remote commit or already-admitted upstream Task run.
 
@@ -231,8 +235,8 @@ Positive qualification on a release-qualified launch:
    system context for the real launch also says enabled. This proves only
    startup qualification.
 2. From one preflighted root, launch a fresh foreground direct child. Require its
-   own `remote_status` and exact identity Bash, let it complete successfully, and
-   preserve the exact returned `task_id` together with its `subagent_type`.
+   own `remote_status`, let it complete successfully, and preserve the exact
+   returned `task_id` together with its `subagent_type`.
    Verify fresh admission is one-shot and registration binds unchanged root
    permission/security-epoch evidence, preserves inherited SSH-project denies,
    and requires explicit matching child agent and permission array.
@@ -240,13 +244,14 @@ Positive qualification on a release-qualified launch:
    `subagent_type`. Verify the existing direct-child session is used and no new
    child is created.
 4. Verify the resumed child cannot use a package project tool on its old
-   preflight. It must call package `remote_status`, then run exactly
-   `hostname; whoami; pwd -P` through package Bash with no explicit workdir
-   before project access.
+   preflight. It must call package `remote_status` before project access. Verify
+   the tool internally runs and validates exact `hostname; whoami; pwd -P`, with
+   no separate Bash call or Bash permission prompt.
 5. Let the resumed run complete successfully. Verify exact launch/root/direct
    child/type, observed agent, root/child permissions, and security epochs still
-   match. The complete new status plus identity epoch is required before a fully
-   validated completion may release that child for a later sequential resume.
+   match. The complete new `remote_status` generation is required before a
+   fully validated completion may release that child for a later sequential
+   resume.
 6. Require the root to wait for the resumed run, repeat `remote_status`, inspect
    remote Git status/diff or every changed path, and report the resumed run
    separately. Record any real remote descendant as unsettled until independently
@@ -282,8 +287,9 @@ Negative qualification and fail-closed evidence:
 
 The exact-version baseline must contain the exact six-name manifest and cover
 safe same-launch resume with zero failed, skipped, or todo cases. This gate
-passed 6/6 on exact OpenCode 1.18.18 on 2026-08-28. Earlier `5/5` entries remain
-historical pre-resume evidence, not the current result.
+passed 6/6 on exact OpenCode 1.18.18 on 2026-08-28 with one-step
+`remote_status` preflight and no separate identity Bash. Earlier `5/5` entries
+remain historical pre-resume evidence, not the current result.
 
 ### Read-Only Sibling Case
 
@@ -291,12 +297,11 @@ historical pre-resume evidence, not the current result.
    visible in the TUI. Give at least one child a strictly read-only inventory
    task.
 2. Require each child, independently and before any project access, to call
-   `remote_status` and run exactly `hostname; whoami; pwd -P` through its
-   SSH-backed Bash tool.
+   `remote_status`. Verify its internal exact `hostname; whoami; pwd -P` result.
 3. Verify both status results identify the expected alias, canonical workdir,
-   connection ID, and healthy ControlMaster. Parent or sibling results do not
-   count for the other child.
-4. Use built-in `explore` for the read-only child. After its identity preflight,
+   connection ID, healthy ControlMaster, hostname, and user. Parent or sibling
+   results do not count for the other child.
+4. Use built-in `explore` for the read-only child. After its status preflight,
    ask it to run one harmless additional package Bash command. Package Bash must
    reject it; then verify package `read`, `glob`, or `grep` remains usable under
    the configured host policy and no mutation occurs.
@@ -315,7 +320,7 @@ historical pre-resume evidence, not the current result.
    concurrently.
 2. Assign one child only `sibling-a/` and the other only `sibling-b/` under the
    disposable workdir. State these as disjoint mutation scopes before launch.
-3. Require both children to complete their own status and exact identity Bash
+3. Require both children to complete their own one-step `remote_status`
    preflight before reading or writing either scope.
 4. Have each child perform one harmless, identifiable file mutation only in its
    assigned directory. Do not let either child inspect or modify the other's
@@ -338,13 +343,13 @@ installed-Task fake-SFTP mutation evidence.
 ### Fail-Closed Permission Case
 
 1. In a fresh disposable two-child run, deny one child's `remote_status` request
-   while allowing the other child to complete both preflight checks.
+   while allowing the other child to complete its one-step preflight.
 2. Verify the denied child performs no Bash call, read, or mutation and does not
    fall back to local Bash or inherit the root's evidence.
 3. On the allowed child, call `remote_status` again and deny the recheck. Verify
-   its previously completed identity is invalidated immediately and subsequent
-   package read/glob/grep calls are rejected until a new healthy status plus
-   identity succeeds.
+   its previously completed preflight is invalidated immediately and subsequent
+   package read/glob/grep calls are rejected until a new fully validated
+   `remote_status` succeeds.
 4. Verify the root reports the stopped child separately and does not claim the
    overall delegated task fully succeeded.
 
@@ -444,9 +449,10 @@ Exit the test TUI, then run a separate read-only session:
 opencode-ssh test-alias /
 ```
 
-Verify `remote_status`, `pwd`, and reading `/etc/os-release`. A root workspace
-must not request external-directory permission, but Unix user permissions still
-apply. Do not mutate system paths during this fit trial.
+Verify `remote_status`, an ordinary post-preflight `pwd`, and reading
+`/etc/os-release`. A root workspace must not request external-directory
+permission, but Unix user permissions still apply. Do not mutate system paths
+during this fit trial.
 
 ## Lifecycle
 

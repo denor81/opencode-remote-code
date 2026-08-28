@@ -695,7 +695,6 @@ function sshResponses(): TaskFixtureSshResponse[] {
       input: `git -C ${cwd} rev-parse --is-inside-work-tree 2>/dev/null`,
       stdout: "true\n",
     },
-    { input: `cd ${cwd} || exit $?\ntrue` },
     { input: `realpath -e -- ${cwd}`, stdout: `${cwd}\n` },
     {
       input: `cd ${cwd} || exit $?\nhostname; whoami; pwd -P`,

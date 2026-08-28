@@ -53,39 +53,37 @@ a command ran. Do not use unknown project tools named `terminal`, `execute`,
 `shell`, `run_command`, or similar unless their execution location is proven.
 
 Package code gives every session independent preflight state and requires this
-sequence before that session's package project tools; the root also needs it
-before Task. Guidance requires every direct child to complete the sequence
-before remote project work even if it would return without using a package
-project tool:
+check before that session's package project tools; the root also needs it before
+Task. Guidance requires every direct child to complete the check before remote
+project work even if it would return without using a package project tool:
 
 1. Call `remote_status`.
 2. Require `executor: ssh` and `controlMaster: healthy`.
-3. Note `targetAlias`, `remoteWorkdir`, and `connectionId` as the active target.
-4. Use package SSH-backed `bash`, with no explicit workdir, to run exactly
-   `hostname; whoami; pwd -P`.
-5. Confirm that the shell is remote and that `pwd -P` equals `remoteWorkdir`.
-6. Confirm that every planned mutation is inside all applicable task and
+3. Require non-empty `identity.hostname` and `identity.user`, and require
+   `identity.workdir` to equal `remoteWorkdir`. Package code obtains these by
+   internally running exact `hostname; whoami; pwd -P` in the canonical workdir.
+4. Note `targetAlias`, `remoteWorkdir`, and `connectionId` as the active target.
+5. Confirm that every planned mutation is inside all applicable task and
    project boundaries.
 
-Every package status or identity attempt advances a per-session generation. A
-new generation invalidates earlier status/identity and aborts active package
-project SSH, SFTP, and mutation leases. Only a completed healthy status followed
-by a zero-exit, exactly three-line identity result with non-empty hostname/user
-and matching canonical workdir restores preflight. A denied, canceled, failed,
-unhealthy, truncated, or mismatched check keeps package project tools and root
-Task blocked. An already completed remote commit and already-admitted upstream
-Task execution are not retroactively undone. Parent evidence is never copied to
-a child. An admitted Task resume deliberately clears that child's earlier state,
-so the resumed run must repeat this entire sequence.
+Every package `remote_status` attempt advances a per-session generation. A new
+generation invalidates earlier preflight and aborts active package project SSH,
+SFTP, and mutation leases. Only a zero-exit, non-truncated, exactly three-line
+identity result with non-empty hostname/user and matching canonical workdir
+restores preflight. A denied, canceled, failed, non-zero, truncated, malformed,
+or mismatched check keeps package project tools and root Task blocked. An
+already completed remote commit and already-admitted upstream Task execution
+are not retroactively undone. Parent evidence is never copied to a child. An
+admitted Task resume deliberately clears that child's earlier state, so the
+resumed run must repeat `remote_status`.
 
 Guidance: repeat verification after a reconnect, context compaction, unexpected
 transport error, or loss of confidence in the execution location, and before a
 dangerous administrative operation.
 
-Before identity completes, package Bash permits only that exact command. After
-identity, built-in `explore` still cannot use package Bash for project commands;
-its package `read`, `glob`, and `grep` remain subject to OpenCode host policy.
-There is no package local-Bash fallback.
+Package Bash is not a preflight mechanism. Built-in `explore` cannot use package
+Bash for project commands; its package `read`, `glob`, and `grep` remain subject
+to OpenCode host policy after preflight. There is no package local-Bash fallback.
 
 The package defaults `remote_status` to `ask` only if neither global nor the
 configured `explore` policy explicitly matches it. Package permission requests
@@ -93,7 +91,8 @@ offer no persistent `always`, so `ask` may prompt on each call. OpenCode host
 policy must approve an ask before the corresponding operation. Guidance: never
 work around a deny with another agent, tool, or local command; name the conflict
 and stop rather than creating a matching local file or switching execution
-tools.
+tools. The `remote_status` permission authorizes only the package-owned fixed
+identity probe; it does not authorize arbitrary Bash.
 
 Task security epochs observe both event pairs: OpenCode v2 `permission.asked`
 followed by `permission.replied` carrying `requestID`, and legacy
@@ -135,13 +134,15 @@ local diagnostic file as project context.
 
 Permission timing matters. Incomplete preflight rejects package project tools
 before path resolution, baseline reads, SSH/SFTP preparation, or tool-specific
-permission preparation. `remote_status` asks before its health SSH. After
-preflight, canonicalization can use SSH before a `bash`, `read`, `glob`, `grep`,
-or `edit` prompt. Write/edit/patch pull current content before `edit` approval to
-prepare the diff. A lexical external path asks for `external_directory` before
-canonicalization. No requested Bash command or remote mutation runs before its
-corresponding approval. Preparatory baselines remain in the private local mirror
-until cleanup and are visible to trusted same-UID local processes.
+permission preparation. `remote_status` asks before its fixed identity SSH
+command and completes preflight only after validating the result. No separate
+preflight `bash` request occurs. After preflight, canonicalization can use SSH
+before a `bash`, `read`, `glob`, `grep`, or `edit` prompt. Write/edit/patch pull
+current content before `edit` approval to prepare the diff. A lexical external
+path asks for `external_directory` before canonicalization. No requested Bash
+command or remote mutation runs before its corresponding approval. Preparatory
+baselines remain in the private local mirror until cleanup and are visible to
+trusted same-UID local processes.
 
 ## 2. Workdir, Scope, And Shell Semantics
 
@@ -337,12 +338,12 @@ caller root, direct child, type, observed agent, root/child permissions, and
 security epochs.
 
 When a resume is admitted, the child's old preflight is gone. Before any package
-project tool, the resumed child MUST call package `remote_status`, then use
-package Bash with no explicit workdir to run exactly
-`hostname; whoami; pwd -P`. Earlier preflight from the child, root, or a sibling
-does not count. This full new epoch is also required before successful registry
-release for another sequential resume. Exact model continuity is not promised;
-do not infer it from reuse of the child ID.
+project tool, the resumed child MUST call package `remote_status`. The tool
+internally runs and validates exact `hostname; whoami; pwd -P` in the canonical
+launch workdir. Earlier preflight from the child, root, or a sibling does not
+count. This full new epoch is also required before successful registry release
+for another sequential resume. Exact model continuity is not promised; do not
+infer it from reuse of the child ID.
 
 Once reserved, a failed, missing, malformed, aborted, canceled, or uncertain
 admission/completion permanently locks the child for the launch. Never retry
