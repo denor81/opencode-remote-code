@@ -12,10 +12,11 @@ resume is package-controlled and enabled only for explicitly release-qualified
 OpenCode 1.18.18; another loader/runtime-compatible version keeps fresh
 foreground direct Task but rejects `task_id` before upstream execution.
 
-Final 2026-08-28 evidence includes the exact 1.18.18 six-scenario resume gate
-and installed real-Task fake-SFTP mutation. Formal direct-child release remains
-incomplete only for real-SSH two-sibling mutation and real permission-UI and
-direct-child TUI behavior. The real-SSH suite was not run.
+Final 2026-08-28 evidence includes the exact 1.18.18 six-scenario resume gate,
+the installed permission-engine scenario, and installed real-Task fake-SFTP
+mutation. Formal direct-child release remains incomplete only for real-SSH
+two-sibling mutation and real permission-UI and direct-child TUI behavior. The
+real-SSH suite was not run.
 
 ```bash
 opencode-ssh staging /srv/app
@@ -169,6 +170,12 @@ is not a chroot:
 - File tools request `external_directory` permission for direct paths outside
   the workdir.
 - An explicit external `bash.workdir` requests the same permission.
+- Choosing `Allow always` for `external_directory` reuses approval for that
+  exact normalized path and its descendants until the current OpenCode process
+  exits. It does not approve the separate `read`, `glob`, `grep`, `edit`, or
+  `bash` operation.
+- External paths containing literal `*`, `?`, or `\\` are rejected because
+  OpenCode's wildcard matcher cannot represent those POSIX names safely.
 - Arbitrary shell text such as `cd /etc && ...` is governed by the normal
   `bash` permission because shell paths cannot be parsed reliably.
 - Each bash call is independent, so `cd` does not persist.
@@ -249,13 +256,21 @@ When startup qualification enables resume, all of these rules apply:
 
 The package defaults `remote_status` to `ask` only when neither global policy
 nor the configured `explore` policy explicitly matches it. Stable global and
-per-agent `allow`, `ask`, or `deny` rules remain supported. Package permission
-requests provide no persistent `always` choice, so an `ask` can prompt on each
-call. In OpenCode 1.18.18, parent session `ask` rules are not inherited by Task
-children. The package therefore rejects delegation when a root-session `ask`
-matches an SSH project permission and directs the user to global or per-agent
-policy. Do not rely on parent session `allow`/`ask` propagation; inherited
-denies remain restrictive.
+per-agent `allow`, `ask`, or `deny` rules remain supported. All package
+permissions except `external_directory` provide no reusable `always` pattern,
+so an `ask` can prompt on each call. For a supported normalized external path,
+`external_directory` offers the exact path and its descendants as a reusable
+approval; external paths containing `*`, `?`, or `\\` are rejected. OpenCode
+keeps that approval only in the
+current process, not across restart, and applies it instance-wide across root
+and child sessions. It can therefore supersede a matching global, per-agent, or
+session deny; use `Allow once` when policy isolation matters, and restart
+OpenCode to clear an approval that became too broad. Reviewed global/per-agent
+config remains the durable policy mechanism across restarts. In OpenCode
+1.18.18, parent session `ask` rules are not inherited by Task children. The
+package still rejects delegation when a root-session `ask` matches an SSH
+project permission and validates inherited deny arrays, but that validation
+cannot scope OpenCode's instance-wide interactive approvals.
 
 Task security epochs observe both event pairs: OpenCode v2 `permission.asked`
 followed by `permission.replied` carrying `requestID`, and legacy
@@ -326,9 +341,10 @@ Once preflight is complete, path canonicalization can use SSH before the
 `bash`, `read`, `glob`, or `grep` prompt; write, edit, and patch also pull current
 content before the `edit` prompt so OpenCode can present a diff. A lexical path
 outside the workdir asks for `external_directory` before its canonicalization
-probe. No file mutation or requested Bash command runs before its corresponding
-approval. Preparatory content is held in the private launch mirror until cleanup
-and is accessible to trusted same-UID local processes.
+probe; a different canonical external target receives a separate check. No file
+mutation or requested Bash command runs before its corresponding approval.
+Preparatory content is held in the private launch mirror until cleanup and is
+accessible to trusted same-UID local processes.
 
 ### File Replacement
 
@@ -450,7 +466,15 @@ plugin lookup/health/source/version/mirror/pool/bootstrap/config/ready/disposal,
 plus one at-most-once-per-launch
 `plugin.task_root_permission.normalized` warning when an omitted caller-root
 permission overlay is accepted as empty. That warning carries only the standard
-correlation fields and is not per-call telemetry.
+correlation fields and is not per-call telemetry. A narrow external-directory
+permission lifecycle adds `plugin.permission.external_directory.requested`,
+`plugin.permission.external_directory.replied`, and the anomaly warning
+`plugin.permission.external_directory.repeated_after_always`. The tracker covers
+at most 64 request lifecycles per launch and emits
+`plugin.permission.external_directory.diagnostics_limited` if that count or an
+internal evidence-size limit is exceeded. These records contain only
+reply/lifetime, bounded reason enums, and boolean reusable, coverage, pending,
+or repeat state; they do not contain the path or host permission IDs.
 Records correlate first by non-secret `startupID`, then `launchID` and
 `targetID`. `targetID` is the stable pseudonymous SHA-256 of alias plus canonical
 workdir. It is not secret and is not claimed irreversible against guessed alias/
@@ -463,9 +487,9 @@ provider data. The only displayed path is the local diagnostic path above.
 Repository code can reuse `createFileLogger` from the relative `./logger.js`-
 style NodeNext path. Use stable event names matching
 `[A-Za-z0-9][A-Za-z0-9._:-]*`, allowlist non-secret fields, and start critical
-cleanup or disposal before awaiting a diagnostic write. This is
-startup-focused diagnostics with the single compatibility signal above, not
-general project/tool/session telemetry.
+cleanup or disposal before awaiting a diagnostic write. This remains
+startup-focused diagnostics plus the two explicitly documented runtime
+compatibility boundaries above, not general project/tool/session telemetry.
 
 ## Testing
 
@@ -476,6 +500,7 @@ npm run build
 npm run test:unit
 npm run test:integration
 npm run build && npm exec -- vitest run test/integration/opencode-subagent.test.ts --reporter=verbose
+npm run build && npm exec -- vitest run test/integration/opencode-permission.test.ts --reporter=verbose
 OPENCODE_TASK_TEST_BINARY=/absolute/path/to/opencode-1.18.18 npm run test:task-baseline
 npm test
 npm run test:smoke
@@ -484,14 +509,15 @@ node dist/cli.js self-test
 ```
 
 `test:task-baseline` requires the explicit executable and accepts only exact
-OpenCode 1.18.18 with all six scenarios, including safe same-launch resume,
-passing with zero failed, skipped, or todo scenarios. Final evidence recorded on
-2026-08-28 is:
+OpenCode 1.18.18 with the unchanged six-name Task manifest, including safe
+same-launch resume, plus one installed permission-engine scenario passing with
+zero failed, skipped, or todo scenarios. Final evidence recorded on 2026-08-28
+is:
 
 - `npm run lint` passed, and `npm run build` passed repeatedly.
 - The actual installed OpenCode 1.18.25 self-test passed; Task resume was
   disabled.
-- The focused merged diagnostics/lifecycle gate passed 101/101.
+- The focused permission/diagnostics/lifecycle gate passed 121/121.
 - The complete installed-loader gate passed 3/3 with zero skips. Its actual
   target-free self-test held valid health decoys on every resolved localhost
   loopback address at port 4096, saw zero connections and requests, and observed
@@ -500,11 +526,16 @@ passing with zero failed, skipped, or todo scenarios. Final evidence recorded on
 - Ordinary installed OpenCode 1.18.25 passed all 6/6 Task scenarios. Resume was
   disabled, every `task_id` was rejected before upstream execution, and the
   fresh-Task fallback passed.
+- Installed OpenCode 1.18.25 and exact 1.18.18 each passed the real permission-
+  engine scenario: exact/descendant external reuse, separate Bash prompts, an
+  unrelated-scope ask, process-wide second-session reuse despite that session's
+  agent-level deny, and privacy-safe lifecycle logs. This is SDK-driven
+  permission-engine evidence, not visual TUI permission-UI evidence.
 - The exact baseline binary
   `/tmp/opencode/opencode-ai-1.18.18/node_modules/.bin/opencode` resolved to
   `/tmp/opencode/opencode-ai-1.18.18/node_modules/opencode-ai/bin/opencode.exe`.
-  The baseline accepted the exact six-name manifest: 6 passed, 0 failed, and 0
-  skipped; the resume scenario was enabled.
+  The baseline accepted the exact six-name Task manifest plus one permission
+  scenario: 7 passed, 0 failed, and 0 skipped; the resume scenario was enabled.
 - The exact sixth scenario took `task_id` from the root model-visible Task
   result, cross-checked the actual direct child, proved the identical package
   write was blocked before renewed preflight with zero SSH/SFTP preparation,
@@ -515,7 +546,7 @@ passing with zero failed, skipped, or todo scenarios. Final evidence recorded on
 - Installed 1.18.25 fresh Task and exact 1.18.18 fresh/resume paths accepted the
   normal TUI-shaped omitted root permission overlay while retaining explicit
   child permission arrays. This API-shaped evidence is not a visual TUI gate.
-- `npm test` passed 32 unit/integration files and 456/456 tests, then 2 smoke
+- `npm test` passed 33 unit/integration files and 462/462 tests, then 2 smoke
   files/tests passed 2/2.
 - `npm pack --dry-run` passed with 165 files listed, and `git diff --check`
   passed.
@@ -536,11 +567,12 @@ requires reviewed passwordless `sudo -n id -u`; it is not Task, OpenCode, TUI,
 or permission-UI evidence. The opt-in checklist is separate from default
 real-SSH-free tests in
 [`docs/upstream-fit-checklist.md`](docs/upstream-fit-checklist.md).
-The actual-loader and focused Task integration tests run with the installed
-OpenCode and skip only when no `opencode` executable exists. Loader success does
-not replace the Task test. Formal direct-child release remains incomplete only
-for the disposable real-SSH two-sibling mutation gate and real permission UI and
-direct-child TUI checks. `npm run test:real` was not run on 2026-08-28. The
+The actual-loader, focused Task, and permission-engine integration tests run with
+the installed OpenCode and skip only when no `opencode` executable exists.
+Loader success does not replace the Task or permission test. Formal direct-child
+release remains incomplete only for the disposable real-SSH two-sibling mutation
+gate and real permission UI and direct-child TUI checks. `npm run test:real` was
+not run on 2026-08-28. The
 historical five live-output checks in the
 [installation guide](docs/installation-and-usage.md#manual-tui-checks) cover
 Bash-card rendering, not these direct-child boundaries.
@@ -562,8 +594,9 @@ Bash-card rendering, not these direct-child boundaries.
   remote descendants may survive and require remote inspection.
 - Mirrors are launch-scoped; concurrent launchers do not share local files.
 - Real-SSH direct-sibling mutation and real permission-UI/direct-child TUI
-  behavior remain unverified release boundaries. The exact six-scenario gate
-  and installed real-Task fake-SFTP mutation are complete.
+  behavior remain unverified release boundaries. The exact six-scenario Task
+  gate, installed permission-engine scenario, and installed real-Task fake-SFTP
+  mutation are complete.
 
 See [SECURITY.md](SECURITY.md) for the exact boundary.
 

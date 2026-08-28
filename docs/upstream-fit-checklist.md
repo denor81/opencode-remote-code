@@ -24,6 +24,7 @@ npm run lint:test
 npm run test:unit
 npm run test:integration
 npm run build && npm exec -- vitest run test/integration/opencode-subagent.test.ts --reporter=verbose
+npm run build && npm exec -- vitest run test/integration/opencode-permission.test.ts --reporter=verbose
 OPENCODE_TASK_TEST_BINARY=/absolute/path/to/opencode-1.18.18 npm run test:task-baseline
 npm test
 npm run test:smoke
@@ -31,10 +32,12 @@ npm pack --dry-run
 node dist/cli.js self-test
 ```
 
-The actual OpenCode loader and focused Task integration tests must run, not
-skip. The exact baseline command additionally requires the explicit executable,
-version 1.18.18, six passes including safe same-launch resume, and zero
-failed/skipped/todo scenarios.
+The actual OpenCode loader, focused Task, and permission-engine integration tests
+must run, not skip. The exact baseline command additionally requires the explicit
+executable,
+version 1.18.18, the unchanged six-name Task manifest including safe same-launch
+resume, one installed permission-engine scenario, and zero failed/skipped/todo
+scenarios.
 
 The pre-SSH `opencode debug config` probe uses protocol v3 to publish a
 target-free, nonce-bound marker with loader runtime version/source and callable
@@ -64,16 +67,18 @@ resume disabled; ordinary installed OpenCode 1.18.25
 passed 6/6 with resume disabled and fresh fallback. Exact binary
 `/tmp/opencode/opencode-ai-1.18.18/node_modules/.bin/opencode` resolved to
 `/tmp/opencode/opencode-ai-1.18.18/node_modules/opencode-ai/bin/opencode.exe`;
-the exact baseline accepted its six names with 6 passed, 0 failed, 0 skipped, and
-the resume scenario enabled. Every automated preflight used one `remote_status`
-SSH identity command and no separate Bash preflight. Installed 1.18.25 fresh
-Task and exact 1.18.18 fresh/resume paths accepted a TUI-shaped omitted root
-permission overlay while retaining explicit child arrays; this does not prove
-visual TUI behavior. `npm test` passed 32 unit/integration files and 456/456
+the exact baseline accepted its six Task names plus one permission scenario with
+7 passed, 0 failed, 0 skipped, and the resume scenario enabled. Installed 1.18.25
+and exact 1.18.18 permission-engine scenarios passed. Every automated preflight
+used one `remote_status` SSH identity command and no separate Bash preflight.
+Installed 1.18.25 fresh Task and exact 1.18.18 fresh/resume paths accepted a
+TUI-shaped omitted root permission overlay while retaining explicit child
+arrays; this does not prove visual TUI behavior. `npm test` passed 33 unit/
+integration files and 462/462
 tests, then 2 smoke files/tests passed 2/2; `npm pack --dry-run` passed with 165
 files; and `git diff --check` passed.
 
-The focused merged diagnostics/lifecycle gate passed 101/101, and the complete
+The focused permission/diagnostics/lifecycle gate passed 121/121, and the complete
 installed-loader gate passed 3/3 with zero skips. The actual target-free
 no-listener self-test held valid health decoys on every resolved localhost
 loopback address at port 4096, saw zero connections/requests, and reported
@@ -136,14 +141,22 @@ For a reviewed local test profile:
    verify one `plugin.task_root_permission.normalized` warning is emitted at most
    once for the launch. It must contain only the standard correlation envelope,
    with no session/task/permission IDs, policy content, paths, or per-call count.
+9. Exercise `external_directory` with `once`, `always`, and `reject`. Verify the
+   request/reply lifecycle uses only documented booleans, reply/lifetime, and the
+   standard envelope. Run the focused plugin-registration integration for the
+   same-scope repeat-after-`always` and bounded diagnostics-limit warnings. No
+   path, pattern, metadata, or host permission ID may appear.
 
 ## Remote Test Directory
 
-Create a unique directory after reviewing the path:
+Create unique project and external-scope directories after reviewing both paths:
 
 ```bash
-ssh test-alias 'umask 077; mkdir -p /tmp/opencode-ssh-fit-YYYYMMDD'
+ssh test-alias 'umask 077; mkdir -p -- /tmp/opencode-ssh-fit-YYYYMMDD /tmp/opencode-ssh-fit-external-YYYYMMDD/child'
 ```
+
+The external directory must remain a disposable sibling, not a descendant, of
+the launch workdir.
 
 Start the test OpenCode in a second local terminal:
 
@@ -167,7 +180,12 @@ Ask the test session to perform these in order:
    password prompt.
 3. Create no files yet; list the empty test directory with `read` and `glob`.
 4. Request a read of `/etc/os-release`; verify an external-directory permission
-   prompt appears before access. Test deny once, then allow on a second request.
+   prompt appears before access and test deny once. Then request the disposable
+   sibling `/tmp/opencode-ssh-fit-external-YYYYMMDD`, choose `Allow always`, and
+   in the same OpenCode process repeat that exact path plus its seeded `child`
+   descendant. Verify no second `external_directory` prompt appears for that
+   scope. A separate `read` prompt may still apply. Access to a different
+   disposable external scope must still ask.
 5. Run a normal local Serper/MCP action and verify that integration still works.
 
 ## Disposable Two-Sibling TUI Gate
@@ -195,9 +213,14 @@ directory. Do not infer a pass from the loader or ready marker.
    the gate.
 
 Pass condition: every permission prompt identifies the child/session and exact
-tool operation being approved. Package requests offer no persistent `always`,
-so expect a prompt on each matching call. Approval for the root or one child
-must not be treated as approval or preflight evidence for another child.
+tool operation being approved. Only `external_directory` offers reusable
+`always`, for the exact normalized path and descendants until process exit.
+Record that OpenCode applies it instance-wide to root/child sessions; it is not
+preflight evidence and does not approve the separate operation. Other package
+permissions ask on each matching call unless configured policy allows them.
+The reusable approval may supersede matching global, per-agent, or session
+denies until process exit. External paths containing literal `*`, `?`, or `\\`
+must reject before access.
 
 ### Package Preflight And Task Guard Case
 
@@ -296,9 +319,10 @@ Negative qualification and fail-closed evidence:
 
 The exact-version baseline must contain the exact six-name manifest and cover
 safe same-launch resume with zero failed, skipped, or todo cases. This gate
-passed 6/6 on exact OpenCode 1.18.18 on 2026-08-28 with one-step
-`remote_status` preflight and no separate identity Bash. Earlier `5/5` entries
-remain historical pre-resume evidence, not the current result.
+passed the Task portion 6/6 and the complete Task-plus-permission baseline 7/7 on
+exact OpenCode 1.18.18 on 2026-08-28 with one-step `remote_status` preflight and
+no separate identity Bash. Earlier `5/5` entries remain historical pre-resume
+evidence, not the current result.
 
 ### Read-Only Sibling Case
 
@@ -314,13 +338,19 @@ remain historical pre-resume evidence, not the current result.
    ask it to run one harmless additional package Bash command. Package Bash must
    reject it; then verify package `read`, `glob`, or `grep` remains usable under
    the configured host policy and no mutation occurs.
-5. Ask a child to delegate once. First observe that `task` is normally absent.
+5. If the root selected external-directory `Allow always` for the disposable
+   sibling `/tmp/opencode-ssh-fit-external-YYYYMMDD` in the same process, ask the
+   read-only child to inspect that scope. Verify no new `external_directory`
+   prompt appears while any separate `read`/`glob`/`grep` policy still applies.
+   Record this as OpenCode instance-wide behavior, not inherited child policy or
+   package preflight.
+6. Ask a child to delegate once. First observe that `task` is normally absent.
    Where a reviewed custom/later config exposes it for this negative check, the
    package runtime guard must reject the child call. No grandchild may appear
    and the child must not substitute a local command.
-6. Observe the separate child Task/tool cards and attribute every permission
+7. Observe the separate child Task/tool cards and attribute every permission
    prompt, result, failure, or denial to the correct child.
-7. Require the root to wait for both children, repeat `remote_status`, and
+8. Require the root to wait for both children, repeat `remote_status`, and
    remotely verify that the directory remained unchanged.
 
 ### Disjoint Mutation Sibling Case
@@ -466,9 +496,11 @@ during this fit trial.
 ## Lifecycle
 
 1. Exit OpenCode normally and verify the launcher exits.
-2. Start it again with the same alias/workdir and verify the prior session is
-   visible, but verify its old child ID is not eligible for Task resume in the
-   new launch.
+2. Exit the root-workspace trial, then start the original alias and disposable
+   `/tmp/opencode-ssh-fit-YYYYMMDD` workdir again. Verify its prior session is
+    visible, but its old child ID is not eligible for Task resume in the new
+    launch. Verify the earlier interactive external-directory `always` approval
+    is also gone and `/tmp/opencode-ssh-fit-external-YYYYMMDD` asks again.
 3. Interrupt one test run with Ctrl-C and verify no `opencode`, SSH master, or
    control socket remains for that launch.
 
@@ -477,7 +509,7 @@ during this fit trial.
 Review the exact unique path before deletion:
 
 ```bash
-ssh test-alias 'rm -rf -- /tmp/opencode-ssh-fit-YYYYMMDD'
+ssh test-alias 'rm -rf -- /tmp/opencode-ssh-fit-YYYYMMDD /tmp/opencode-ssh-fit-external-YYYYMMDD'
 ```
 
 Before deletion, verify both sibling mutation paths, any cancellation processes,
@@ -489,10 +521,11 @@ Record evidence in `docs/upstream-fit-report.md`. Never include credentials,
 private key data, provider tokens, production content, real aliases, hostnames,
 usernames, IP addresses, workdirs, target IDs, or exact OS/kernel fingerprints.
 Record the exact OpenCode version and distinguish the loader, automated Task,
-same-launch resume positive/negative qualification, real-SSH sibling, and manual
-TUI results; a pass at one boundary is not evidence for another. Keep the fresh
-exact six-scenario baseline and installed real-Task fake-SFTP mutation recorded
-as completed 2026-08-28 fake-transport evidence. Keep real-SSH two-sibling
-mutation and real permission-UI/direct-child TUI as separate pending boundaries
+installed permission engine, same-launch resume positive/negative qualification,
+real-SSH sibling, and manual TUI results; a pass at one boundary is not evidence
+for another. Keep the fresh exact six-scenario Task plus one permission baseline
+and installed real-Task fake-SFTP mutation recorded as completed 2026-08-28 fake-
+transport evidence. Keep real-SSH two-sibling mutation and real permission-UI/
+direct-child TUI as separate pending boundaries
 until each is observed. Formal direct-child release remains incomplete while
 either remains pending; `npm run test:real` was not run in the 2026-08-28 cycle.

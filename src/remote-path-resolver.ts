@@ -53,7 +53,7 @@ export class RemotePathResolver {
     if (canonical === undefined) {
       throw new Error(`Remote path does not exist or cannot be resolved: ${lexical}`)
     }
-    if (!externalAuthorized) {
+    if (!externalAuthorized || canonical !== lexical) {
       await requestExternalDirectory(ctx, this.remoteRoot, canonical)
     }
     return canonical
@@ -65,7 +65,7 @@ export class RemotePathResolver {
   ): Promise<ResolvedMutationPath> {
     const { lexical, externalAuthorized } = await this.prepare(input, ctx)
     const canonical = await this.resolveMutationCanonical(lexical, ctx.abort)
-    if (!externalAuthorized) {
+    if (!externalAuthorized || canonical !== lexical) {
       await requestExternalDirectory(ctx, this.remoteRoot, canonical)
     }
 

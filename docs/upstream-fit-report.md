@@ -10,6 +10,7 @@ Status: HARDENING RELEASE INCOMPLETE. The final verified 2026-08-28 automated ev
 | OpenCode automated loader observation | The normal installed-loader harness passed with a real serve process on a dynamically selected, test-only IPv4-loopback port; runtime health used the host-configured SDK transport through that process-owned listener, no fixed fixture port is a production trust input, and the separate pre-SSH probe remains no-listener `opencode debug config` |
 | OpenCode automated direct-child Task baseline | Exact explicit 1.18.18 passed the exact six-name manifest, 6/6 with zero failed/skipped; resume scenario enabled |
 | OpenCode automated direct-child Task observation | Ordinary installed 1.18.25 passed 6/6; resume disabled and fresh fallback passed |
+| OpenCode automated permission-engine observation | Installed 1.18.25 and exact 1.18.18 passed exact/descendant process-local external approval, separate Bash permission, unrelated-scope ask, instance-wide second-session reuse despite agent-level deny, and privacy-safe lifecycle logging |
 | opencode-ssh | 0.1.0 |
 | Local OS | Linux x86_64 |
 | Local Node.js | Node.js 22 compatible runtime |
@@ -23,8 +24,8 @@ Status: HARDENING RELEASE INCOMPLETE. The final verified 2026-08-28 automated ev
 ## Evidence Scope
 
 The 2026-08-28 results below are the latest complete default-suite, packaging,
-exact Task, runtime-health, and startup-logging evidence. Focused boundaries are
-recorded separately from aggregate suite counts and are not interchangeable.
+exact Task/permission, runtime-health, and logging evidence. Focused boundaries
+are recorded separately from aggregate suite counts and are not interchangeable.
 The prior direct-subagent SDD and dated fit runs remain useful historical
 observations, but they do not prove the current hardened worktree.
 No real SSH, `npm run test:real`, publish, or manual TUI action ran in these
@@ -42,13 +43,14 @@ interchangeable evidence boundaries.
 | `npm run lint` | Pass; strict production and test/helper TypeScript checks |
 | `npm run build` | Pass repeatedly |
 | Normal installed OpenCode Task observation | OpenCode 1.18.25; all 6/6 scenarios passed, resume remained disabled, `task_id` was rejected before upstream execution, and fresh fallback passed |
-| `OPENCODE_TASK_TEST_BINARY=/tmp/opencode/opencode-ai-1.18.18/node_modules/.bin/opencode npm run test:task-baseline` | Exact explicit 1.18.18 selected; the command path resolved to `/tmp/opencode/opencode-ai-1.18.18/node_modules/opencode-ai/bin/opencode.exe`; exact six-name manifest accepted; 6 passed, 0 failed, 0 skipped; resume scenario enabled |
+| `OPENCODE_TASK_TEST_BINARY=/tmp/opencode/opencode-ai-1.18.18/node_modules/.bin/opencode npm run test:task-baseline` | Exact explicit 1.18.18 selected; the command path resolved to `/tmp/opencode/opencode-ai-1.18.18/node_modules/opencode-ai/bin/opencode.exe`; exact six-name Task manifest plus one permission scenario accepted; 7 passed, 0 failed, 0 skipped; resume scenario enabled |
 | Exact sixth Task scenario | Root used the model-visible Task result ID and cross-checked the actual child; an identical package write was blocked before renewed preflight with zero SSH/SFTP preparation; one renewed `remote_status` then completed atomic fake-SFTP get, private put, and `mv -fT --` with expected final content |
 | One-step package preflight | Every automated root, direct child, and resumed child used one `remote_status` SSH invocation of `hostname; whoami; pwd -P`; no separate Bash preflight tool call or `bash` permission was used |
 | Installed real-Task fake-SFTP mutation | Pass in the exact sixth scenario; this is real installed OpenCode Task with fake SFTP transport, not real-host SFTP evidence |
+| Installed permission engine | Pass on installed 1.18.25 and exact 1.18.18; exact and descendant external scopes reused after `always`, Bash remained separately prompted, an unrelated scope asked, a second session reused the process-wide approval despite its agent-level deny, and lifecycle logs excluded paths and host permission IDs; SDK responses and fake SSH make this non-visual evidence |
 | Omitted root permission overlay | Installed OpenCode 1.18.25 fresh Task and exact 1.18.18 fresh/resume paths accepted the normal TUI-shaped omitted root overlay as `[]` while retaining explicit child arrays; this API-shaped evidence is not a visual/default-TUI gate |
 | Actual installed loader integration | Pass, 3/3 with zero skips; launches a real OpenCode serve process on a dynamically selected, test-only IPv4-loopback port, observes runtime health through the host-configured SDK transport using that process-owned listener, crosses plugin activation and the 25 ms stable-ready boundary, and verifies production activation/disposal with correlated startup logs; no fixed fixture port is trusted by production, the pre-SSH probe remains no-listener `opencode debug config`, and SSH/SFTP transport is fake |
-| `npm test` | Pass; 32 unit/integration files and 456/456 tests, then 2 smoke files/tests passed 2/2 |
+| `npm test` | Pass; 33 unit/integration files and 462/462 tests, then 2 smoke files/tests passed 2/2 |
 | `npm run test:smoke` | Pass; 2/2 |
 | `npm pack --dry-run` | Pass; 165 files listed; volatile tarball hashes and sizes are not release claims |
 | `git diff --check` | Pass |
@@ -65,6 +67,9 @@ The exact six-name manifest was:
 5. `real installed OpenCode Task through opencode-ssh propagates root session abort to two child SSH slaves without retry`
 6. `real installed OpenCode Task through opencode-ssh resumes one completed direct child only when startup qualification enables it`
 
+The same exact baseline separately required
+`real installed OpenCode permission engine through opencode-ssh reuses external-directory always for exact and descendant scopes only`.
+
 ## Verified Runtime-Health And Logging Evidence
 
 These focused gates passed in the same final 2026-08-28 cycle:
@@ -73,11 +78,11 @@ These focused gates passed in the same final 2026-08-28 cycle:
 | --- | --- |
 | Lint and build | Pass |
 | Actual installed OpenCode self-test | Pass on 1.18.25; Task resume disabled |
-| Focused merged gate | 101/101 passed |
+| Focused permission/diagnostics/lifecycle gate | 121/121 passed |
 | Installed loader gate | 3/3 passed with zero skips |
 | Exact target-free no-listener self-test | Valid health decoys held every resolved localhost loopback address at port 4096; OpenCode made zero connections and zero requests; health used the configured in-process SDK path and reported `client._client.get` |
 | Real-serve production lifecycle | Activation, SDK-transport health through the process-owned listener, disposal, and cross-process correlated startup logs passed |
-| Logging contract | One private JSONL file per UTC day, activity-triggered pruning with no background timer, append/no-follow/nonblocking flags, record limit, best-effort deadline behavior, failure suppression, safe fields, startup correlation, and one allowlisted root-permission normalization warning at most once per launch passed focused coverage; maintenance keeps the current UTC day plus four previous days, while stale files may remain without later logging activity |
+| Logging contract | One private JSONL file per UTC day, activity-triggered pruning with no background timer, append/no-follow/nonblocking flags, record limit, best-effort deadline behavior, failure suppression, safe fields, startup correlation, one allowlisted root-permission normalization warning at most once per launch, and the bounded external-directory request/reply/repeat/limit lifecycle passed focused and real-engine coverage; maintenance keeps the current UTC day plus four previous days, while stale files may remain without later logging activity |
 
 The correlated records were limited to documented startup components and
 non-secret `startupID`, then `launchID`/`targetID`. `targetID` is the stable
@@ -86,7 +91,8 @@ irreversible against guessed inputs. Production assertions covered stable
 failure fields without raw errors/messages and excluded raw target alias/
 canonical workdir and project/local paths, commands, configuration, nonce/token/
 credential values and their hashes, session/task/permission IDs, output/bodies,
-and model/provider data. The 500 ms logger value is a caller deadline, not
+and model/provider data. External lifecycle records exposed only the documented
+reply/lifetime, bounded reason, and boolean state fields. The 500 ms logger value is a caller deadline, not
 cancellation or universal bounded native-filesystem settlement.
 
 OpenCode 1.18.18/1.18.23 do not expose public `client.global.health`; the tested
@@ -195,13 +201,13 @@ SSH-slave settlement under the harness. It is not evidence that every real
 remote descendant would terminate.
 
 This historical automated exact OpenCode 1.18.18 Task boundary passed before the
-audit-hardening SDD. The final 2026-08-28 exact six-scenario gate above
-supersedes it as current installed-Task evidence. These historical five-scenario
-runs did not cover installed-Task SFTP mutation; the new exact sixth scenario now
-closes only the installed real-Task fake-SFTP boundary. Neither historical nor
-current fake-transport evidence closes real-SSH siblings, permission UI, or
-direct-child TUI. It also does not rewrite the earlier historical real-host and
-live-output TUI evidence.
+audit-hardening SDD. The final 2026-08-28 exact six-scenario Task gate plus one
+permission-engine scenario above supersedes it as current installed evidence.
+These historical five-scenario runs did not cover installed-Task SFTP mutation;
+the new exact sixth Task scenario closes only the installed real-Task fake-SFTP
+boundary. Neither historical nor current fake-transport evidence closes real-
+SSH siblings, permission UI, or direct-child TUI. It also does not rewrite the
+earlier historical real-host and live-output TUI evidence.
 
 ## Historical Live Bash Automated Gates
 
@@ -244,8 +250,11 @@ termination.
    a different literal name. Batch paths now use unquoted backslash escaping;
    the real-host regression with `literal[1]?.txt` passes.
 2. Canonicalizing an already external symlink path initially produced two
-   permission requests. It now asks once for a lexical external path and still
-   asks for hidden symlink escapes originating inside the workspace.
+   permission requests, and the historical implementation reduced that to one.
+   The current process-local `always` contract deliberately checks a different
+   canonical external target again so a reusable lexical symlink approval cannot
+   silently follow a retargeted link. Hidden symlink escapes originating inside
+   the workspace also ask for their canonical external target.
 
 ## Known Compatibility Risk
 
@@ -259,12 +268,13 @@ different OpenCode release must be revalidated rather than assumed compatible.
 Current audit-hardening decision: **NO-GO for formal direct-child release** until
 the two separately approved real/manual boundaries are observed.
 
-Final 2026-08-28 automated Task evidence is green on exact OpenCode 1.18.18 and
-ordinary installed OpenCode 1.18.25. The exact six-scenario baseline, installed
-real-Task fake-SFTP mutation, default tests, smoke, and package dry-run are no
-longer pending. Historical real-host transport/file/lifecycle and OpenCode
-1.18.18 live-Bash TUI evidence remains recorded, but it does not prove the
-hardened direct-child permission UI or real-SSH sibling mutation path.
+Final 2026-08-28 automated Task and permission-engine evidence is green on exact
+OpenCode 1.18.18 and ordinary installed OpenCode 1.18.25. The exact six-scenario
+Task baseline plus permission scenario, installed real-Task fake-SFTP mutation,
+default tests, smoke, and package dry-run are no longer pending. Historical
+real-host transport/file/lifecycle and OpenCode 1.18.18 live-Bash TUI evidence
+remains recorded, but it does not prove the hardened direct-child permission UI
+or real-SSH sibling mutation path.
 
 Runtime-health/logging evidence is also green as recorded above; it does not
 close the two real/manual release gaps.

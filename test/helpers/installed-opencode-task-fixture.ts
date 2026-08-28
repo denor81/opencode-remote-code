@@ -199,6 +199,7 @@ export async function startInstalledOpenCodeTaskFixture(options: {
   configOverride?: InstalledOpenCodeConfigOverride
   extraSshResponses?: readonly TaskFixtureSshResponse[]
   enableFakeRemoteFilesystem?: boolean
+  fakeRemoteDirectories?: readonly string[]
 }): Promise<InstalledOpenCodeTaskFixture> {
   accessSync(productionCli, constants.X_OK)
   const root = await mkdtemp(path.join(os.tmpdir(), "ocssh-real-task-"))
@@ -240,6 +241,16 @@ export async function startInstalledOpenCodeTaskFixture(options: {
         recursive: true,
         mode: 0o700,
       })
+      await Promise.all(
+        (options.fakeRemoteDirectories ?? []).map((remotePath) =>
+          mkdir(fakeRemotePath(fakeRemoteRoot, remotePath), {
+            recursive: true,
+            mode: 0o700,
+          })
+        )
+      )
+    } else if ((options.fakeRemoteDirectories?.length ?? 0) > 0) {
+      throw new Error("Fake remote directories require the fake remote filesystem")
     }
     await Promise.all([
       preseedConfigDependencies(configDirectory),
@@ -1009,7 +1020,11 @@ export function waitForReadyEvent(
     void launcherResult.then(
       (result) =>
         finish(
-          new Error(`Launcher exited before the ready marker: ${describeResult(result)}`)
+          new Error(
+            `Launcher exited before the ready marker: ${describeResult(result)}; stdout=${JSON.stringify(
+              bounded(result.stdout)
+            )}; stderr=${JSON.stringify(bounded(result.stderr))}`
+          )
         ),
       finish
     )

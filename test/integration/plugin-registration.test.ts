@@ -30,6 +30,7 @@ import { FIXTURE_CONTROL_ENV_NAMES } from "../helpers/fixture-environment.js"
 const fakeSftp = fileURLToPath(new URL("../fixtures/bin/sftp", import.meta.url))
 const fakeSsh = fileURLToPath(new URL("../fixtures/bin/ssh", import.meta.url))
 const temporaryRoots: string[] = []
+let fixtureSequence = 0
 const isolatedEnvironmentNames = [
   ...Object.values(REMOTE_ENV),
   ...FIXTURE_CONTROL_ENV_NAMES,
@@ -873,6 +874,326 @@ describe("server plugin registration", () => {
       await hooks?.dispose?.()
     }
   })
+
+  it("logs external-directory permission lifecycle without sensitive scope data", async () => {
+    const fixture = await createPluginFixture("1.18.25")
+    const { logDirectory, startupID } = enablePluginLogging(fixture)
+    const sessionID = "private-external-session"
+    const scope = "/private/remote/permission/scope"
+    let hooks: Hooks | undefined
+
+    const request = async (
+      permissionID: string,
+      patterns: string[],
+      always: string[],
+      executor = "ssh"
+    ): Promise<void> => {
+      await hooks!.event?.({
+        event: {
+          type: "permission.asked",
+          properties: {
+            id: permissionID,
+            sessionID,
+            permission: "external_directory",
+            patterns,
+            always,
+            metadata: { executor, remoteWorkspace: "/private/workspace" },
+          },
+        } as never,
+      })
+    }
+    const reply = async (
+      permissionID: string,
+      response: "once" | "always" | "reject",
+      legacy = false
+    ): Promise<void> => {
+      await hooks!.event?.({
+        event: {
+          type: "permission.replied",
+          properties: legacy
+            ? { sessionID, permissionID, response }
+            : { sessionID, requestID: permissionID, reply: response },
+        } as never,
+      })
+    }
+
+    try {
+      hooks = await RemoteCodePlugin.server(
+        pluginInput(vi.fn(), "1.18.25"),
+        pluginOptions(fixture)
+      )
+      await hooks.config?.({} as never)
+
+      const canceledParent = "/private/remote/canceled"
+      await request(
+        "private-request-canceled",
+        [`${canceledParent}/child`],
+        [`${canceledParent}/child`, `${canceledParent}/child/*`]
+      )
+      await hooks.event?.({
+        event: {
+          type: "session.idle",
+          properties: { sessionID },
+        } as never,
+      })
+      await request(
+        "private-request-canceled-parent",
+        [canceledParent],
+        [canceledParent, `${canceledParent}/*`]
+      )
+      await reply("private-request-canceled-parent", "always")
+      await request("private-request-always", [scope], [scope, `${scope}/*`])
+      await request(
+        "private-request-pending-descendant",
+        [`${scope}/child`],
+        [`${scope}/child`, `${scope}/child/*`]
+      )
+      await reply("private-request-always", "always")
+      await reply("private-request-pending-descendant", "always")
+      await request(
+        "private-request-repeat",
+        [`${scope}/child`],
+        [`${scope}/child`, `${scope}/child/*`]
+      )
+      await reply("private-request-repeat", "once", true)
+      await request(
+        "private-request-empty-always",
+        ["/separate/private/wild*"],
+        [],
+        "ssh"
+      )
+      await reply("private-request-empty-always", "always")
+      await request(
+        "private-request-reject",
+        ["/separate/private/rejected"],
+        ["/separate/private/rejected", "/separate/private/rejected/*"]
+      )
+      await reply("private-request-reject", "reject")
+      await request(
+        "ignored-local-request",
+        ["/ignored/private/path"],
+        ["/ignored/private/path"],
+        "local"
+      )
+      await reply("ignored-local-request", "always")
+      const oversizedScope = `/${"s".repeat(9_000)}`
+      await request("oversized-private-request", [oversizedScope], [])
+      await reply("oversized-private-request", "once")
+
+      const records = await waitForPluginLogEventCounts(logDirectory, {
+        "plugin.permission.external_directory.requested": 7,
+        "plugin.permission.external_directory.replied": 6,
+        "plugin.permission.external_directory.repeated_after_always": 1,
+        "plugin.permission.external_directory.diagnostics_limited": 1,
+      })
+      const requested = records.filter(
+        (record) =>
+          record.event === "plugin.permission.external_directory.requested"
+      )
+      const replied = records.filter(
+        (record) => record.event === "plugin.permission.external_directory.replied"
+      )
+      const repeated = records.filter(
+        (record) =>
+          record.event ===
+          "plugin.permission.external_directory.repeated_after_always"
+      )
+      const limited = records.filter(
+        (record) =>
+          record.event ===
+          "plugin.permission.external_directory.diagnostics_limited"
+      )
+
+      expect(requested).toHaveLength(7)
+      for (const record of requested) {
+        expect(record.fields).toEqual({
+          component: "server-plugin",
+          startupID,
+          launchID: fixture.launchID,
+          targetID: fixture.targetID,
+          reusableScopeOffered: record.fields?.reusableScopeOffered,
+          sameScopeRepeated: record.fields?.sameScopeRepeated,
+          coveredByPriorAlways: record.fields?.coveredByPriorAlways,
+        })
+      }
+      expect(
+        requested
+          .map((record) =>
+            JSON.stringify([
+              record.fields?.reusableScopeOffered,
+              record.fields?.sameScopeRepeated,
+              record.fields?.coveredByPriorAlways,
+            ])
+          )
+          .sort()
+      ).toEqual(
+        [
+          ...Array.from({ length: 5 }, () => JSON.stringify([true, false, false])),
+          JSON.stringify([true, true, true]),
+          JSON.stringify([false, false, false]),
+        ].sort()
+      )
+      expect(replied).toHaveLength(6)
+      for (const record of replied) {
+        expect(record.fields).toEqual({
+          component: "server-plugin",
+          startupID,
+          launchID: fixture.launchID,
+          targetID: fixture.targetID,
+          reply: record.fields?.reply,
+          reusableScopeOffered: record.fields?.reusableScopeOffered,
+          approvalLifetime: record.fields?.approvalLifetime,
+          matchingPendingRequest: record.fields?.matchingPendingRequest,
+        })
+      }
+      expect(
+        replied
+          .map((record) =>
+            JSON.stringify([
+              record.fields?.reply,
+              record.fields?.reusableScopeOffered,
+              record.fields?.approvalLifetime,
+              record.fields?.matchingPendingRequest,
+            ])
+          )
+          .sort()
+      ).toEqual(
+        [
+          JSON.stringify(["always", true, "opencode-process", false]),
+          JSON.stringify(["always", true, "opencode-process", true]),
+          JSON.stringify(["always", true, "opencode-process", false]),
+          JSON.stringify(["once", true, "single-request", false]),
+          JSON.stringify(["always", false, "single-request", false]),
+          JSON.stringify(["reject", true, "none", false]),
+        ].sort()
+      )
+      expect(repeated).toHaveLength(1)
+      expect(repeated[0]?.level).toBe("warn")
+      expect(repeated[0]?.fields).toEqual({
+        component: "server-plugin",
+        startupID,
+        launchID: fixture.launchID,
+        targetID: fixture.targetID,
+      })
+      expect(limited).toHaveLength(1)
+      expect(limited[0]?.level).toBe("warn")
+      expect(limited[0]?.fields).toEqual({
+        component: "server-plugin",
+        startupID,
+        launchID: fixture.launchID,
+        targetID: fixture.targetID,
+        reason: "record-size",
+      })
+      const serialized = JSON.stringify([
+        ...requested,
+        ...replied,
+        ...repeated,
+        ...limited,
+      ])
+      for (const secret of [
+        sessionID,
+        scope,
+        canceledParent,
+        "private-request",
+        "/private/workspace",
+        "/ignored/private/path",
+        oversizedScope,
+      ]) {
+        expect(serialized).not.toContain(secret)
+      }
+    } finally {
+      await hooks?.dispose?.()
+    }
+  })
+
+  it("bounds external-directory permission diagnostics per launch", async () => {
+    const fixture = await createPluginFixture("1.18.25")
+    const { logDirectory, startupID } = enablePluginLogging(fixture)
+    const sessionID = "private-limit-session"
+    const scopePrefix = "/private/limit/scope"
+    let hooks: Hooks | undefined
+
+    try {
+      hooks = await RemoteCodePlugin.server(
+        pluginInput(vi.fn(), "1.18.25"),
+        pluginOptions(fixture)
+      )
+      await hooks.config?.({} as never)
+
+      for (let index = 0; index < 64; index++) {
+        const scope = `${scopePrefix}/${index}`
+        await hooks.event?.({
+          event: {
+            type: "permission.asked",
+            properties: {
+              id: `private-limit-request-${index}`,
+              sessionID,
+              permission: "external_directory",
+              patterns: [scope],
+              always: [scope, `${scope}/*`],
+              metadata: { executor: "ssh" },
+            },
+          } as never,
+        })
+        await hooks.event?.({
+          event: {
+            type: "session.idle",
+            properties: { sessionID },
+          } as never,
+        })
+      }
+
+      await hooks.dispose?.()
+      hooks = await RemoteCodePlugin.server(
+        pluginInput(vi.fn(), "1.18.25"),
+        pluginOptions(fixture)
+      )
+      await hooks.config?.({} as never)
+      const finalScope = `${scopePrefix}/64`
+      await hooks.event?.({
+        event: {
+          type: "permission.asked",
+          properties: {
+            id: "private-limit-request-64",
+            sessionID,
+            permission: "external_directory",
+            patterns: [finalScope],
+            always: [finalScope, `${finalScope}/*`],
+            metadata: { executor: "ssh" },
+          },
+        } as never,
+      })
+
+      const records = await waitForPluginLogEventCounts(logDirectory, {
+        "plugin.permission.external_directory.requested": 64,
+        "plugin.permission.external_directory.diagnostics_limited": 1,
+      }, 5_000)
+      const requested = records.filter(
+        (record) =>
+          record.event === "plugin.permission.external_directory.requested"
+      )
+      const limited = records.filter(
+        (record) =>
+          record.event ===
+          "plugin.permission.external_directory.diagnostics_limited"
+      )
+      expect(requested).toHaveLength(64)
+      expect(limited).toHaveLength(1)
+      expect(limited[0]?.fields).toEqual({
+        component: "server-plugin",
+        startupID,
+        launchID: fixture.launchID,
+        targetID: fixture.targetID,
+        reason: "request-limit",
+      })
+      const serialized = JSON.stringify([...requested, ...limited])
+      for (const secret of [sessionID, scopePrefix, "private-limit-request"]) {
+        expect(serialized).not.toContain(secret)
+      }
+    } finally {
+      await hooks?.dispose?.()
+    }
+  }, 15_000)
 
   it("registers, resumes, revokes preflight, locks missing completion, and clears deleted children when enabled", async () => {
     const fixture = await createPluginFixture()
@@ -1772,7 +2093,7 @@ async function createPluginFixture(
   temporaryRoots.push(root)
   const alias = "fixture-host"
   const remoteWorkdir = "/srv/plugin workspace"
-  const launchID = "plugin-registration-launch"
+  const launchID = `plugin-registration-launch-${++fixtureSequence}`
   const nonce = "fixture-ready-nonce-0123456789abcdef0123456789abcdef"
   const targetID = computeTargetID(alias, remoteWorkdir)
   const runtimeDir = path.join(root, "runtime")
@@ -1969,6 +2290,38 @@ async function waitForPluginLogEvents(
   }
   throw new Error(
     `Timed out waiting for plugin log events ${JSON.stringify(expectedEvents)}; observed ${JSON.stringify(records.map((record) => record.event))}`
+  )
+}
+
+async function waitForPluginLogEventCounts(
+  logDirectory: string,
+  expectedCounts: Readonly<Record<string, number>>,
+  timeoutMs = 2_000
+): Promise<PluginLogRecord[]> {
+  const logPath = resolveDailyLogFilePath({ logDirectory })
+  const deadline = Date.now() + timeoutMs
+  let records: PluginLogRecord[] = []
+  while (Date.now() <= deadline) {
+    let contents = ""
+    try {
+      contents = await readFile(logPath, "utf8")
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+    records = parseJsonLines<PluginLogRecord>(contents)
+    if (
+      Object.entries(expectedCounts).every(
+        ([event, count]) =>
+          records.filter((record) => record.event === event).length >= count
+      )
+    ) {
+      await delay(100)
+      return parseJsonLines<PluginLogRecord>(await readFile(logPath, "utf8"))
+    }
+    await delay(20)
+  }
+  throw new Error(
+    `Timed out waiting for plugin log event counts ${JSON.stringify(expectedCounts)}; observed ${JSON.stringify(records.map((record) => record.event))}`
   )
 }
 

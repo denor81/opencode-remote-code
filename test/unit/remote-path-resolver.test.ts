@@ -28,7 +28,7 @@ describe("RemotePathResolver", () => {
       expect.objectContaining({
         permission: "external_directory",
         patterns: ["/etc/passwd"],
-        always: [],
+        always: ["/etc/passwd", "/etc/passwd/*"],
       })
     )
   })
@@ -57,6 +57,7 @@ describe("RemotePathResolver", () => {
     expect(ask.mock.calls[0][0]).toMatchObject({
       permission: "external_directory",
       patterns: ["/etc/new/child"],
+      always: ["/etc/new/child", "/etc/new/child/*"],
     })
   })
 
@@ -87,7 +88,7 @@ describe("RemotePathResolver", () => {
     expect(ask).not.toHaveBeenCalled()
   })
 
-  it("asks once before probing a lexical external path", async () => {
+  it("authorizes both lexical and different canonical external paths", async () => {
     const events: string[] = []
     const pool = new FakePool((command) => {
       events.push(`exec:${command}`)
@@ -105,6 +106,29 @@ describe("RemotePathResolver", () => {
     expect(events).toEqual([
       "ask:/outside/link",
       "exec:realpath -e -- /outside/link",
+      "ask:/private/target",
+    ])
+  })
+
+  it("rechecks a reusable external symlink scope after its target changes", async () => {
+    let realpathCalls = 0
+    const pool = new FakePool(() => {
+      realpathCalls++
+      return commandResult(
+        realpathCalls === 1 ? "/private/first\n" : "/private/second\n"
+      )
+    })
+    const ask = vi.fn<ToolContext["ask"]>(async () => undefined)
+    const resolver = new RemotePathResolver("/workspace", pool)
+
+    await resolver.resolveExisting("/outside/link", toolContext(ask))
+    await resolver.resolveExisting("/outside/link", toolContext(ask))
+
+    expect(ask.mock.calls.map(([input]) => input.patterns)).toEqual([
+      ["/outside/link"],
+      ["/private/first"],
+      ["/outside/link"],
+      ["/private/second"],
     ])
   })
 

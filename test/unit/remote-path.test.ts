@@ -1,6 +1,7 @@
 import type { ToolContext } from "@opencode-ai/plugin"
 import { describe, expect, it, vi } from "vitest"
 import {
+  externalDirectoryAlwaysPatterns,
   isWithinRemoteRoot,
   normalizeRemotePath,
   requestExternalDirectory,
@@ -45,12 +46,35 @@ describe("external directory permission", () => {
     expect(ask).toHaveBeenCalledWith({
       permission: "external_directory",
       patterns: ["/srv/shared/file.txt"],
-      always: [],
+      always: ["/srv/shared/file.txt", "/srv/shared/file.txt/*"],
       metadata: {
         executor: "ssh",
         remoteWorkspace: "/srv/app",
       },
     })
+  })
+
+  it("offers exact and descendant process-local scopes without wildcard expansion", () => {
+    expect(externalDirectoryAlwaysPatterns("/var/log")).toEqual([
+      "/var/log",
+      "/var/log/*",
+    ])
+    expect(externalDirectoryAlwaysPatterns("/")).toEqual(["/", "/*"])
+    expect(externalDirectoryAlwaysPatterns("/var/log/*")).toEqual([])
+    expect(externalDirectoryAlwaysPatterns("/var/lo?g")).toEqual([])
+    expect(externalDirectoryAlwaysPatterns("/var/log\\archive")).toEqual([])
+  })
+
+  it("rejects external paths whose literal names OpenCode cannot represent", async () => {
+    const ask = vi.fn(async () => undefined)
+    const context = { ask } as unknown as ToolContext
+
+    for (const input of ["/var/log/*", "/var/lo?g", "/var/log\\archive"]) {
+      await expect(
+        requestExternalDirectory(context, "/srv/app", input)
+      ).rejects.toThrow(/cannot represent them literally/i)
+    }
+    expect(ask).not.toHaveBeenCalled()
   })
 
   it("never requests external permission when the remote workspace is root", async () => {

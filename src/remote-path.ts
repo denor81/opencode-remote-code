@@ -2,6 +2,7 @@ import path from "node:path"
 import type { ToolContext } from "@opencode-ai/plugin"
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/
+const PERMISSION_WILDCARD_CHARACTERS = /[?*\\]/u
 
 export function assertValidRemotePath(value: string, name = "Remote path"): void {
   if (typeof value !== "string" || CONTROL_CHARACTERS.test(value)) {
@@ -37,6 +38,12 @@ export function remotePermissionPattern(remoteRoot: string, remotePath: string):
   return relative || "."
 }
 
+export function externalDirectoryAlwaysPatterns(remotePath: string): string[] {
+  const normalized = normalizeRemotePath("/", remotePath)
+  if (PERMISSION_WILDCARD_CHARACTERS.test(normalized)) return []
+  return [normalized, path.posix.join(normalized, "*")]
+}
+
 export async function requestExternalDirectory(
   ctx: ToolContext,
   remoteRoot: string,
@@ -44,10 +51,15 @@ export async function requestExternalDirectory(
 ): Promise<void> {
   const normalized = normalizeRemotePath(remoteRoot, remotePath)
   if (isWithinRemoteRoot(remoteRoot, normalized)) return
+  if (PERMISSION_WILDCARD_CHARACTERS.test(normalized)) {
+    throw new Error(
+      "External remote paths containing *, ?, or \\ are unsupported because OpenCode permission matching cannot represent them literally"
+    )
+  }
   await ctx.ask({
     permission: "external_directory",
     patterns: [normalized],
-    always: [],
+    always: externalDirectoryAlwaysPatterns(normalized),
     metadata: {
       executor: "ssh",
       remoteWorkspace: normalizeRemotePath("/", remoteRoot),

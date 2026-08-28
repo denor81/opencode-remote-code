@@ -177,7 +177,7 @@ describe("SshClient", () => {
     const command = fixture
       .client("slow", { killGraceMs: 20 })
       .exec("sleep", { timeout: 500 })
-    await waitForFile(fixture.logPath)
+    await waitForCalls(fixture.logPath, 1)
     const error = await command.catch((value: unknown) => value)
 
     expect(error).toMatchObject({ name: "TimeoutError", alias: "slow" })
@@ -190,7 +190,7 @@ describe("SshClient", () => {
     const command = abortFixture
       .client("abort", { killGraceMs: 20 })
       .exec("wait", { signal: controller.signal })
-    await waitForFile(abortFixture.logPath)
+    await waitForCalls(abortFixture.logPath, 1)
     controller.abort(new Error("test abort"))
 
     const abortError = await command.catch((value: unknown) => value)
@@ -250,11 +250,15 @@ async function readCalls(logPath: string): Promise<string[][]> {
     .map((line) => JSON.parse(line) as string[])
 }
 
-async function waitForFile(path: string): Promise<void> {
+async function waitForCalls(logPath: string, count: number): Promise<string[][]> {
   const deadline = Date.now() + 2_000
   while (Date.now() < deadline) {
-    if (await readFile(path).then(() => true, () => false)) return
+    const calls = await readCalls(logPath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+      throw error
+    })
+    if (calls.length >= count) return calls
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
-  throw new Error(`Timed out waiting for fixture file ${path}`)
+  throw new Error(`Timed out waiting for ${count} SSH fixture calls in ${logPath}`)
 }

@@ -87,8 +87,13 @@ to OpenCode host policy after preflight. There is no package local-Bash fallback
 
 The package defaults `remote_status` to `ask` only if neither global nor the
 configured `explore` policy explicitly matches it. Package permission requests
-offer no persistent `always`, so `ask` may prompt on each call. OpenCode host
-policy must approve an ask before the corresponding operation. Guidance: never
+other than `external_directory` offer no reusable `always`, so `ask` may prompt
+on each call. `Allow always` for a normalized external path covers that exact
+path and its descendants until the current OpenCode process exits; it does not
+approve the separate tool operation. External paths containing literal `*`,
+`?`, or `\\` are rejected because OpenCode cannot match those POSIX names
+literally. OpenCode host policy must approve an ask before the corresponding
+operation. Guidance: never
 work around a deny with another agent, tool, or local command; name the conflict
 and stop rather than creating a matching local file or switching execution
 tools. The `remote_status` permission authorizes only the package-owned fixed
@@ -139,10 +144,11 @@ command and completes preflight only after validating the result. No separate
 preflight `bash` request occurs. After preflight, canonicalization can use SSH
 before a `bash`, `read`, `glob`, `grep`, or `edit` prompt. Write/edit/patch pull
 current content before `edit` approval to prepare the diff. A lexical external
-path asks for `external_directory` before canonicalization. No requested Bash
-command or remote mutation runs before its corresponding approval. Preparatory
-baselines remain in the private local mirror until cleanup and are visible to
-trusted same-UID local processes.
+path asks for `external_directory` before canonicalization; a different
+canonical external target receives a separate check. No requested Bash command
+or remote mutation runs before its corresponding approval. Preparatory baselines
+remain in the private local mirror until cleanup and are visible to trusted
+same-UID local processes.
 
 ## 2. Workdir, Scope, And Shell Semantics
 
@@ -154,6 +160,13 @@ Direct file paths outside the workdir are canonicalized remotely and normally
 request `external_directory` permission. Arbitrary paths embedded in shell text
 cannot be inferred reliably and remain governed by the `bash` permission. Never
 use shell text to bypass a path or project boundary.
+
+OpenCode keeps an interactive external-directory `Allow always` approval in the
+current process and shares it across root and child sessions. It is not durable
+across restart and can supersede a matching global, per-agent, or session deny.
+Use `Allow once` when policy isolation matters, restart OpenCode to clear an
+approval that became too broad, and use reviewed global/per-agent policy for
+durable rules across restarts.
 
 A project guide or the user may define a narrower mutation scope. That scope
 applies to file tools, shell commands, `sudo`, package managers, services, and
@@ -361,8 +374,10 @@ OpenCode 1.18.18 does not inherit a parent session `ask` into Task children. If
 the root session has an `ask` matching an SSH project permission, package code
 rejects delegation instead of silently weakening it. Use stable reviewed global
 or per-agent policy. Do not assume parent session `allow` or `ask` propagation;
-inherited denies remain restrictive. Package requests offer no persistent
-`always`, so per-call prompts are expected under `ask`.
+the package still validates inherited deny arrays. An instance-wide
+external-directory approval is a separate OpenCode boundary and can supersede a
+matching global, per-agent, or session deny for its exact path/descendants until
+process exit. Other package requests can still prompt on each matching `ask`.
 
 Every fresh or resumed child receives this guidance and must separately satisfy
 Section 1 before that child's package project tools. Package enforcement requires

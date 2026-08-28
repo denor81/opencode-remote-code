@@ -158,15 +158,27 @@ remain TCB limits.
 
 The resolved policy adds `remote_status: ask` only when neither global nor the
 configured `explore` policy explicitly matches that permission. Stable global
-and per-agent policy is supported. Package permission requests use no persistent
-`always` patterns, so a host-policy `ask` can prompt for each call. The host
-authorizes the fixed internal identity command through `remote_status`; this
-does not grant arbitrary package Bash. OpenCode
+and per-agent policy is supported. Package permission requests other than
+`external_directory` use no reusable `always` patterns, so a host-policy `ask`
+can prompt for each call. A supported normalized external path offers its exact
+path and descendants for `Allow always`; external paths containing literal `*`,
+`?`, or `\\` are rejected because OpenCode cannot match those POSIX names
+literally. OpenCode stores that
+approval in memory for the current process and applies it instance-wide, so it
+does not survive restart and can supersede a matching global, per-agent, or
+session deny in a root or child session. Use `Allow once` where policy isolation
+matters, and restart OpenCode to clear an approval that became too broad. The
+separate `read`, `glob`, `grep`, `edit`, or `bash` permission is not granted by
+an external-directory approval. The host authorizes the fixed internal identity
+command through `remote_status`; this does not grant arbitrary package Bash.
+OpenCode
 1.18.18 does not inherit parent session asks into Task children. If a root
 session `ask` matches `remote_status`, `bash`, `read`, `edit`, `glob`, `grep`, or
 `external_directory`, package code rejects delegation and directs the operator
 to global or per-agent policy. Do not claim that parent session `allow`/`ask`
-rules propagate. Parent denies inherited by OpenCode remain restrictive.
+rules propagate. Package Task validation preserves inherited deny arrays, but a
+matching OpenCode instance-wide external-directory approval can supersede those
+arrays and other matching host-policy denies until process exit.
 
 Task security epochs consume both OpenCode v2 `permission.asked` requests and
 `permission.replied` `requestID` delivery, and legacy `permission.updated` plus
@@ -214,8 +226,10 @@ descendants.
   before running the fixed identity SSH command. No separate preflight `bash`
   request occurs. A failed or denied recheck leaves the session invalidated.
 - After preflight, lexical external paths ask for `external_directory` before a
-  canonicalization probe. Other path canonicalization can occur before the
-  tool-specific `bash`, `read`, `glob`, `grep`, or `edit` request.
+  canonicalization probe. If canonicalization resolves to a different external
+  path, that canonical target receives a separate check. Other path
+  canonicalization can occur before the tool-specific `bash`, `read`, `glob`,
+  `grep`, or `edit` request.
 - Write, edit, and patch pull current remote content into the private local
   mirror before requesting `edit`, because the permission metadata includes a
   diff. Read pulls its content after the `read` decision.
@@ -223,9 +237,11 @@ descendants.
   corresponding `bash` or `edit` approval.
 
 These are OpenCode host permission decisions around package-enforced ordering,
-not a filesystem sandbox. Package requests intentionally offer no persistent
-`always`; configure reviewed global/per-agent policy rather than assuming an
-earlier interactive approval will persist or cross sessions.
+not a filesystem sandbox. Only `external_directory` offers a reusable
+interactive scope, limited to the exact normalized path and descendants for the
+current OpenCode process. That scope crosses sessions in the same process but
+not restarts. External paths containing literal `*`, `?`, or `\\` are rejected.
+Configure reviewed global/per-agent policy for durable behavior.
 
 ## Privileges
 
@@ -300,11 +316,16 @@ never replaces the core operation result.
 Instrumentation is intentionally startup-focused: compatibility version/probe;
 launcher SSH, canonicalization, OpenCode, ready, and cleanup; probe health and
 marker publication; and production plugin lookup, health source/version,
-mirror, pool, bootstrap, config, ready, and disposal. The only runtime
-compatibility signal is an at-most-once-per-launch
+mirror, pool, bootstrap, config, ready, and disposal. Runtime compatibility
+signals include an at-most-once-per-launch
 `plugin.task_root_permission.normalized` warning when an omitted caller-root
 permission overlay is accepted as empty. It contains only the standard
-correlation envelope. Non-secret `startupID`
+correlation envelope. The external-directory request/reply lifecycle tracks at
+most 64 requests per launch and also emits a same-scope repeat-after-`always`
+warning plus one bounded diagnostics-limit warning. Those lifecycle records
+contain only the reply/lifetime, bounded limit reason, and boolean reusable/
+coverage/pending/repeat state, never the path, patterns, metadata, or host
+permission IDs. Non-secret `startupID`
 correlates processes, followed by `launchID` and `targetID`. `targetID` is the
 stable pseudonymous SHA-256 of alias plus canonical workdir. It is not secret and
 is not claimed irreversible against guessed alias/workdir inputs. Production
@@ -320,8 +341,9 @@ remain trusted and can read that private local file.
 
 Future callers must use stable event names matching
 `[A-Za-z0-9][A-Za-z0-9._:-]*` and reviewed non-secret fields. Critical cleanup
-or disposal must start before awaiting diagnostics. The logger must not become
-per-call project, tool, permission, session, model, or provider telemetry.
+or disposal must start before awaiting diagnostics. Do not expand the narrow
+documented external-directory lifecycle into general project, tool, permission,
+session, model, or provider telemetry.
 
 ## Live Command Output
 
@@ -364,8 +386,9 @@ universal termination of real remote descendants.
 
 Final 2026-08-28 automated evidence passed the exact OpenCode 1.18.18
 six-scenario manifest with safe same-launch resume and installed real-Task
-fake-SFTP mutation. Ordinary installed OpenCode 1.18.25 also passed 6/6 with
-resume disabled and fresh fallback. Every automated preflight used one
+fake-SFTP mutation, plus a real installed permission-engine scenario. Ordinary
+installed OpenCode 1.18.25 also passed 6/6 with resume disabled and fresh
+fallback, and its permission-engine scenario passed. Every automated preflight used one
 `remote_status` identity SSH command and no separate Bash preflight. The
 installed 1.18.25 fresh path and exact 1.18.18 fresh/resume paths accepted an
 omitted root permission overlay as empty while retaining explicit child arrays.
@@ -375,8 +398,8 @@ two-sibling mutation and real permission UI and direct-child TUI behavior;
 evidence and are not the current six-scenario result.
 
 The same final cycle's focused runtime-health/logging evidence passed lint/build,
-actual OpenCode 1.18.25 self-test with Task resume disabled, a merged 101/101
-gate, and installed-loader 3/3 with zero skips. The target-free localhost:4096
+actual OpenCode 1.18.25 self-test with Task resume disabled, a focused 121/121
+permission/diagnostics/lifecycle gate, and installed-loader 3/3 with zero skips. The target-free localhost:4096
 decoys saw zero connections/requests and the observer reported
 `client._client.get`; real-serve activation/disposal and correlated logs also
 passed. The complete default, smoke, and package dry-run gates passed; detailed

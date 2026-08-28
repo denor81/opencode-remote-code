@@ -45,6 +45,7 @@ import { createWriteTool } from "./tools/write.js"
 
 const launchOwners = new Map<string, symbol>()
 const rootPermissionNormalizationLoggedLaunches = new Set<string>()
+const permissionDiagnosticBudgets = new Map<string, PermissionDiagnosticBudget>()
 
 const RemoteCodePlugin: Plugin = async (_input, options) => {
   const probe = activateCompatibilityProbe(_input, options)
@@ -147,6 +148,7 @@ const RemoteCodePlugin: Plugin = async (_input, options) => {
         },
       }
     )
+    const permissionDiagnostics = createPermissionDiagnostics(diagnostics)
 
     stage = "bootstrap"
     void logProduction(diagnostics, "info", "plugin.bootstrap.started")
@@ -193,6 +195,7 @@ const RemoteCodePlugin: Plugin = async (_input, options) => {
       if (disposePromise) return disposePromise
 
       lifecycleState = "disposing"
+      permissionDiagnostics.dispose()
       const poolClose = beginPoolClose(activePool)
       const errors: unknown[] = []
       try {
@@ -525,6 +528,7 @@ const RemoteCodePlugin: Plugin = async (_input, options) => {
         if (lifecycleState !== "active") return
         const permissionEvent = normalizePermissionEvent(event)
         if (permissionEvent) {
+          permissionDiagnostics.observe(permissionEvent)
           try {
             if (permissionEvent.kind === "request") {
               taskHooks.observePermissionRequest(permissionEvent)
@@ -542,7 +546,12 @@ const RemoteCodePlugin: Plugin = async (_input, options) => {
           }
           return
         }
+        if (event.type === "session.idle") {
+          permissionDiagnostics.clearSession(event.properties.sessionID)
+          return
+        }
         if (event.type === "session.deleted") {
+          permissionDiagnostics.clearSession(event.properties.info.id)
           taskHooks.invalidateSessionSecurity(event.properties.info.id)
           sessionSafety.clearSession(event.properties.info.id)
           taskResumeRegistry?.clearSession(event.properties.info.id)
@@ -625,9 +634,47 @@ type NormalizedPermissionEvent =
       sessionID: string
       permissionID: string
       permission: string
+      externalDirectory?: {
+        patterns: readonly string[]
+        always: readonly string[]
+      }
     }
-  | { kind: "reply"; sessionID: string; permissionID: string }
+  | {
+      kind: "reply"
+      sessionID: string
+      permissionID: string
+      reply?: PermissionReply
+    }
   | { kind: "invalidate"; sessionID: string }
+
+type PermissionReply = "once" | "always" | "reject"
+
+interface PermissionDiagnostics {
+  observe(event: NormalizedPermissionEvent): void
+  clearSession(sessionID: string): void
+  dispose(): void
+}
+
+interface PendingExternalPermission {
+  sessionID: string
+  patterns: readonly string[]
+  reusableScope?: string
+  reusableScopeOffered: boolean
+}
+
+interface ExternalPermissionScope {
+  alwaysSelected: boolean
+  repeatAfterAlwaysLogged: boolean
+  requestCount: number
+}
+
+interface PermissionDiagnosticBudget {
+  trackedRequestCount: number
+  trackingLimitLogged: boolean
+}
+
+const MAX_TRACKED_PERMISSION_DIAGNOSTICS = 64
+const MAX_PERMISSION_DIAGNOSTIC_EVIDENCE_BYTES = 8 * 1_024
 
 function configFailure(primary: unknown, disposal: DisposalOutcome): unknown {
   if (disposal.ok) return primary
@@ -670,8 +717,13 @@ function normalizePermissionEvent(event: unknown): NormalizedPermissionEvent | u
         ? event.properties.requestID
         : event.properties.permissionID
     )
+    const reply = permissionReply(
+      Object.hasOwn(event.properties, "reply")
+        ? event.properties.reply
+        : event.properties.response
+    )
     return requestID
-      ? { kind: "reply", sessionID, permissionID: requestID }
+      ? { kind: "reply", sessionID, permissionID: requestID, reply }
       : { kind: "invalidate", sessionID }
   }
 
@@ -681,9 +733,216 @@ function normalizePermissionEvent(event: unknown): NormalizedPermissionEvent | u
       ? event.properties.permission
       : event.properties.type
   )
+  const patterns = stringArray(event.properties.patterns)
+  const always = stringArray(event.properties.always)
+  const metadata = isRecord(event.properties.metadata)
+    ? event.properties.metadata
+    : undefined
+  const externalDirectory =
+    permission === "external_directory" &&
+    metadata?.executor === "ssh" &&
+    patterns &&
+    always
+      ? { patterns, always }
+      : undefined
   return requestID && permission
-    ? { kind: "request", sessionID, permissionID: requestID, permission }
+    ? {
+        kind: "request",
+        sessionID,
+        permissionID: requestID,
+        permission,
+        externalDirectory,
+      }
     : { kind: "invalidate", sessionID }
+}
+
+function permissionReply(value: unknown): PermissionReply | undefined {
+  return value === "once" || value === "always" || value === "reject"
+    ? value
+    : undefined
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? [...value]
+    : undefined
+}
+
+function createPermissionDiagnostics(
+  diagnostics: ProductionDiagnostics | undefined
+): PermissionDiagnostics {
+  if (!diagnostics) {
+    return {
+      observe() {},
+      clearSession() {},
+      dispose() {},
+    }
+  }
+
+  const pending = new Map<string, PendingExternalPermission>()
+  const scopes = new Map<string, ExternalPermissionScope>()
+  const budget = permissionDiagnosticBudgets.get(diagnostics.launchID) ?? {
+    trackedRequestCount: 0,
+    trackingLimitLogged: false,
+  }
+  permissionDiagnosticBudgets.set(diagnostics.launchID, budget)
+  const requestKey = (sessionID: string, permissionID: string): string =>
+    JSON.stringify([sessionID, permissionID])
+  const reportTrackingLimit = (reason: "record-size" | "request-limit"): void => {
+    if (budget.trackingLimitLogged) return
+    budget.trackingLimitLogged = true
+    void logProduction(
+      diagnostics,
+      "warn",
+      "plugin.permission.external_directory.diagnostics_limited",
+      { reason }
+    )
+  }
+
+  return {
+    observe(event) {
+      try {
+        if (event.kind === "request") {
+          const external = event.externalDirectory
+          if (!external) return
+          if (
+            budget.trackedRequestCount >= MAX_TRACKED_PERMISSION_DIAGNOSTICS
+          ) {
+            reportTrackingLimit("request-limit")
+            return
+          }
+          const key = requestKey(event.sessionID, event.permissionID)
+          const evidence = JSON.stringify([key, external.patterns, external.always])
+          if (
+            Buffer.byteLength(evidence, "utf8") >
+            MAX_PERMISSION_DIAGNOSTIC_EVIDENCE_BYTES
+          ) {
+            reportTrackingLimit("record-size")
+            return
+          }
+          budget.trackedRequestCount++
+          const reusableScope = externalReusableScope(external)
+          let scope = reusableScope ? scopes.get(reusableScope) : undefined
+          if (!scope && reusableScope) {
+            scope = {
+              alwaysSelected: false,
+              repeatAfterAlwaysLogged: false,
+              requestCount: 0,
+            }
+            scopes.set(reusableScope, scope)
+          }
+          if (scope) scope.requestCount++
+          const reusableScopeOffered = external.always.length > 0
+          const approvedScope = findApprovedExternalScope(scopes, external.patterns)
+          pending.set(key, {
+            sessionID: event.sessionID,
+            patterns: external.patterns,
+            reusableScope,
+            reusableScopeOffered,
+          })
+          void logProduction(
+            diagnostics,
+            "info",
+            "plugin.permission.external_directory.requested",
+            {
+              reusableScopeOffered,
+              sameScopeRepeated: (scope?.requestCount ?? 1) > 1,
+              coveredByPriorAlways: approvedScope !== undefined,
+            }
+          )
+          if (approvedScope && !approvedScope.repeatAfterAlwaysLogged) {
+            approvedScope.repeatAfterAlwaysLogged = true
+            void logProduction(
+              diagnostics,
+              "warn",
+              "plugin.permission.external_directory.repeated_after_always"
+            )
+          }
+          return
+        }
+
+        if (event.kind !== "reply" || !event.reply) return
+        const key = requestKey(event.sessionID, event.permissionID)
+        const request = pending.get(key)
+        if (!request) return
+        pending.delete(key)
+        const approvalLifetime =
+          event.reply === "reject"
+            ? "none"
+            : event.reply === "always" && request.reusableScopeOffered
+              ? "opencode-process"
+              : "single-request"
+        let matchingPendingRequest = false
+        const reusableScope = request.reusableScope
+        if (event.reply === "always" && reusableScope) {
+          const scope = scopes.get(reusableScope)
+          if (scope) scope.alwaysSelected = true
+          matchingPendingRequest = Array.from(pending.values()).some((candidate) =>
+            externalPatternsCovered(reusableScope, candidate.patterns)
+          )
+        }
+        void logProduction(
+          diagnostics,
+          "info",
+          "plugin.permission.external_directory.replied",
+          {
+            reply: event.reply,
+            reusableScopeOffered: request.reusableScopeOffered,
+            approvalLifetime,
+            matchingPendingRequest,
+          }
+        )
+      } catch {
+        // Permission diagnostics are observational and must not affect policy delivery.
+      }
+    },
+    clearSession(sessionID) {
+      for (const [key, request] of pending) {
+        if (request.sessionID === sessionID) pending.delete(key)
+      }
+    },
+    dispose() {
+      pending.clear()
+      scopes.clear()
+    },
+  }
+}
+
+function externalReusableScope(external: {
+  patterns: readonly string[]
+  always: readonly string[]
+}): string | undefined {
+  if (external.patterns.length !== 1 || external.always.length !== 2) {
+    return undefined
+  }
+  const scope = external.patterns[0]
+  if (
+    external.always[0] !== scope ||
+    external.always[1] !== path.posix.join(scope, "*")
+  ) {
+    return undefined
+  }
+  return scope
+}
+
+function findApprovedExternalScope(
+  scopes: ReadonlyMap<string, ExternalPermissionScope>,
+  patterns: readonly string[]
+): ExternalPermissionScope | undefined {
+  for (const [scope, state] of scopes) {
+    if (state.alwaysSelected && externalPatternsCovered(scope, patterns)) return state
+  }
+  return undefined
+}
+
+function externalPatternsCovered(
+  scope: string,
+  patterns: readonly string[]
+): boolean {
+  return patterns.every(
+    (candidate) =>
+      candidate === scope || scope === "/" || candidate.startsWith(`${scope}/`)
+  )
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

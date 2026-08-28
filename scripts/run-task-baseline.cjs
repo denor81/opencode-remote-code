@@ -10,7 +10,7 @@ const path = require("node:path")
 
 const expectedVersion = "1.18.18"
 const suiteName = "real installed OpenCode Task through opencode-ssh"
-const expectedScenarioFullNames = [
+const expectedTaskScenarioFullNames = [
   "runs one real root-to-general-child Task with SSH-backed tools",
   "runs concurrent direct siblings and clamps configured depth seven",
   "preserves an inherited session deny for read",
@@ -18,6 +18,13 @@ const expectedScenarioFullNames = [
   "propagates root session abort to two child SSH slaves without retry",
   "resumes one completed direct child only when startup qualification enables it",
 ].map((title) => `${suiteName} ${title}`)
+const expectedPermissionScenarioFullName =
+  "real installed OpenCode permission engine through opencode-ssh reuses external-directory always for exact and descendant scopes only"
+const expectedScenarioFullNames = [
+  ...expectedTaskScenarioFullNames,
+  expectedPermissionScenarioFullName,
+]
+const expectedTaskScenarios = expectedTaskScenarioFullNames.length
 const expectedScenarios = expectedScenarioFullNames.length
 const selected = process.env.OPENCODE_TASK_TEST_BINARY
 
@@ -52,6 +59,7 @@ const result = spawnSync(
     vitest,
     "run",
     "test/integration/opencode-subagent.test.ts",
+    "test/integration/opencode-permission.test.ts",
     "--reporter=verbose",
     "--reporter=json",
     `--outputFile.json=${reportPath}`,
@@ -107,7 +115,7 @@ try {
     exactManifest
   if (!accepted) {
     throw new Error(
-      `Exact OpenCode Task baseline requires the exact six-scenario manifest with zero failed, skipped, or todo scenarios; received ${JSON.stringify(
+      `Exact OpenCode baseline requires the exact six-scenario Task manifest plus one permission scenario with zero failed, skipped, or todo scenarios; received ${JSON.stringify(
         {
           success: report?.success,
           total: report?.numTotalTests,
@@ -115,7 +123,8 @@ try {
           failed: report?.numFailedTests,
           skipped: report?.numPendingTests,
           todo: report?.numTodoTests,
-          expectedScenarioFullNames,
+          expectedTaskScenarioFullNames,
+          expectedPermissionScenarioFullName,
           receivedScenarioFullNames,
           assertionStatuses: assertions.map((assertion) => assertion?.status),
         }
@@ -123,7 +132,7 @@ try {
     )
   }
   process.stdout.write(
-    `Exact OpenCode Task baseline accepted: ${expectedScenarios} passed, 0 failed, 0 skipped\n`
+    `Exact OpenCode baseline accepted: ${expectedTaskScenarios} Task scenarios and 1 permission scenario passed, 0 failed, 0 skipped\n`
   )
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)

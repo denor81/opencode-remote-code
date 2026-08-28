@@ -14,8 +14,9 @@ only for explicitly release-qualified OpenCode 1.18.18. Another compatible
 loader/runtime version keeps fresh foreground direct Task but rejects every
 `task_id` before upstream execution.
 
-Final 2026-08-28 evidence passed the exact six-scenario 1.18.18 resume baseline
-and installed real-Task fake-SFTP mutation. Formal direct-child release remains
+Final 2026-08-28 evidence passed the exact six-scenario 1.18.18 Task portion and
+one permission-engine scenario, making the complete exact baseline 7/7, plus
+installed real-Task fake-SFTP mutation. Formal direct-child release remains
 incomplete only for real-SSH two-sibling mutation and real permission UI and
 direct-child TUI behavior. The real-SSH suite was not run.
 
@@ -292,17 +293,23 @@ universal compatibility.
   `npm run build && npm exec -- vitest run test/integration/opencode-subagent.test.ts --reporter=verbose`.
   It uses the actual installed local OpenCode Task implementation with fake
   SSH/SFTP; it does not contact a real SSH target.
+- The focused installed permission-engine gate is
+  `npm run build && npm exec -- vitest run test/integration/opencode-permission.test.ts --reporter=verbose`.
+  It uses the actual installed OpenCode permission engine with fake SSH and API
+  replies; it is not visual permission-UI evidence.
 - The exact non-skipping release-baseline gate is
   `OPENCODE_TASK_TEST_BINARY=/absolute/path/to/opencode-1.18.18 npm run test:task-baseline`.
   Its updated contract requires that explicit executable, exact version 1.18.18,
-  all six scenarios including safe same-launch resume passing, and zero failed,
-  skipped, or todo scenarios. This release integration gate exercises full Task
+  the unchanged six-name Task manifest including safe same-launch resume, one
+  installed permission-engine scenario, and zero failed, skipped, or todo
+  scenarios. This release integration gate exercises full Task and permission
   behavior; startup does not replace it with a model call on every launch.
-- Final 2026-08-28 evidence passed the exact `6/6` 1.18.18 baseline and its
-  installed real-Task fake-SFTP mutation. The remaining release boundaries are
-  the real-SSH two-sibling mutation case and real permission-UI/direct-child TUI
-  behavior in the detailed fit checklist. Automated loader and fake-transport
-  checks cannot observe those behaviors.
+- Final 2026-08-28 evidence passed the exact 1.18.18 Task portion `6/6` and the
+  complete baseline `7/7` with its permission scenario, plus installed real-Task
+  fake-SFTP mutation. The remaining release boundaries are the real-SSH two-
+  sibling mutation case and real permission-UI/direct-child TUI behavior in the
+  detailed fit checklist. Automated loader and fake-transport checks cannot
+  observe those behaviors.
 
 Implementation and regression anchors are `src/opencode-compatibility.ts`,
 `src/opencode-probe.ts`, `src/session-safety.ts`,
@@ -311,7 +318,8 @@ tests in
 `test/unit/opencode-compatibility.test.ts`, `test/unit/opencode-probe.test.ts`,
 `test/integration/launcher-lifecycle.test.ts`,
 `test/integration/opencode-loader.test.ts`,
-`test/integration/opencode-subagent.test.ts`, and
+`test/integration/opencode-subagent.test.ts`,
+`test/integration/opencode-permission.test.ts`, and
 `test/smoke/package-install.test.ts`.
 
 ## Startup Diagnostics And Reuse
@@ -371,7 +379,16 @@ inputs. The current instrumentation is deliberately narrow:
 - one at-most-once-per-launch `plugin.task_root_permission.normalized` warning
   when an omitted caller-root permission overlay is accepted as empty. The
   warning contains only the standard startup/launch/target correlation envelope
-  and is not per-call or per-session telemetry.
+  and is not per-call or per-session telemetry;
+- `plugin.permission.external_directory.requested` and
+  `plugin.permission.external_directory.replied` lifecycle records, plus
+  `plugin.permission.external_directory.repeated_after_always` when the same
+  scope unexpectedly asks again after an observed reusable approval, and one
+  `plugin.permission.external_directory.diagnostics_limited` warning if bounded
+  tracking reaches its 64-request-per-launch or evidence-size limit. Fields are
+  limited to reply/lifetime, a bounded reason enum, and boolean reusable/
+  coverage/pending/repeat state. Paths, patterns, metadata, and host permission
+  IDs are never recorded.
 
 Production records stable failure categories/codes and allowlisted fields. It
 does not write raw errors/messages, raw target alias/canonical workdir or project/
@@ -401,8 +418,8 @@ field as an explicit allowlist decision; do not pass arbitrary objects or raw
 errors from production startup paths. Start critical cleanup, pool closure, or
 disposal before awaiting a log write so diagnostics cannot delay initiation of
 the security/lifecycle action. Keep this facility startup-focused apart from the
-single compatibility signal above rather than expanding it into per-call
-project, tool, permission, session, model, or provider telemetry.
+two narrow runtime compatibility boundaries above rather than expanding it into
+general project, tool, permission, session, model, or provider telemetry.
 
 ## Configure OpenSSH
 
@@ -535,13 +552,23 @@ OpenCode host-policy behavior:
 - The package adds a global `remote_status: ask` default only when neither the
   global policy nor configured `explore` policy explicitly matches it.
 - Stable global and per-agent `allow`, `ask`, and `deny` remain supported.
-  Package permission requests contain no persistent `always` pattern, so an
-  `ask` may prompt on every call.
+  Package requests other than `external_directory` contain no reusable `always`
+  pattern, so an `ask` may prompt on every call. For a supported normalized
+  external path, `Allow always` covers the exact path and its descendants until
+  the current OpenCode process exits. External paths containing literal `*`,
+  `?`, or `\\` are rejected because OpenCode cannot represent those POSIX names
+  literally. The approval does not grant the
+  separate operation permission. OpenCode applies the approval instance-wide,
+  including other root/child sessions, and may supersede a matching global, per-
+  agent, or session deny. Use `Allow once` when policy isolation matters,
+  restart OpenCode to clear an approval that became too broad, and use reviewed
+  config for durable policy across restarts.
 - OpenCode 1.18.18 does not inherit parent session asks into Task children. If
   a root-session `ask` matches `remote_status`, `bash`, `read`, `edit`, `glob`,
   `grep`, or `external_directory`, package code rejects delegation. Configure
   the intended stable rule globally or per agent instead. Do not rely on parent
-  session `allow`/`ask` propagation; inherited denies remain restrictive.
+  session `allow`/`ask` propagation. Package validation still requires inherited
+  deny arrays, subject to the instance-wide external approval caveat above.
 - Task security epochs consume both event pairs: OpenCode v2 `permission.asked`
   followed by `permission.replied` carrying `requestID`, and legacy
   `permission.updated` followed by `permission.replied` carrying `permissionID`.
@@ -797,12 +824,17 @@ request occurs. After preflight, path canonicalization can run before the
 corresponding `bash`, `read`, `glob`, `grep`, or `edit` prompt. Write/edit/patch
 pull current content before `edit` approval to construct their diff; mutation
 occurs only after approval. A lexical external path asks for
-`external_directory` before its canonicalization probe.
+`external_directory` before its canonicalization probe. A different canonical
+external target receives a separate permission check.
 
-Package requests contain no persistent `always` patterns. Repeated `ask` calls
-can therefore prompt repeatedly. Baselines, diff preparation, and manifests use
-a private launch mirror; normal cleanup removes it, but a reported cleanup
-failure can leave same-UID-readable residue.
+Only `external_directory` offers reusable `always` patterns: the exact
+normalized external path plus its descendants. External paths containing
+literal `*`, `?`, or `\\` are rejected rather than represented as broader
+wildcard rules. The approval lasts for the current OpenCode process, is shared
+across its sessions, and does not grant the subsequent operation-specific
+permission. Other repeated `ask` calls can prompt again. Baselines, diff
+preparation, and manifests use a private launch mirror; normal cleanup removes
+it, but a reported cleanup failure can leave same-UID-readable residue.
 
 ### File And Lifecycle Semantics
 
@@ -841,6 +873,7 @@ npm run lint
 npm run lint:test
 npm test
 npm run build && npm exec -- vitest run test/integration/opencode-subagent.test.ts --reporter=verbose
+npm run build && npm exec -- vitest run test/integration/opencode-permission.test.ts --reporter=verbose
 OPENCODE_TASK_TEST_BINARY=/absolute/path/to/opencode-1.18.18 npm run test:task-baseline
 npm run test:smoke
 npm pack --dry-run
@@ -849,17 +882,18 @@ npm pack --dry-run
 Confirm that the actual OpenCode loader test ran; absence of the `opencode`
 executable is the only condition that permits it to skip. Automated tests do not
 observe terminal rendering or a real SSH sibling launch. Confirm that the
-focused installed-Task test also ran without a skip against the selected
-version. The baseline command is stricter: it requires the explicit executable,
-exact 1.18.18, exactly six passes including safe same-launch resume, and zero
-failed/skipped/todo scenarios.
+focused installed-Task and permission-engine tests also ran without a skip
+against the selected version. The baseline command is stricter: it requires the
+explicit executable,
+exact 1.18.18, the exact six Task scenarios including safe same-launch resume,
+one permission-engine scenario, and zero failed/skipped/todo scenarios.
 
 Final verified 2026-08-28 evidence is:
 
 - `npm run lint` passed, and `npm run build` passed repeatedly.
 - The actual installed OpenCode 1.18.25 self-test passed; Task resume was
   disabled.
-- The focused merged diagnostics/lifecycle gate passed 101/101.
+- The focused permission/diagnostics/lifecycle gate passed 121/121.
 - The complete installed-loader gate passed 3/3 with zero skips. Its actual
   target-free self-test held valid health decoys on every resolved localhost
   loopback address at port 4096, saw zero connections/requests, and reported
@@ -867,11 +901,17 @@ Final verified 2026-08-28 evidence is:
   startup logs passed.
 - Ordinary installed OpenCode 1.18.25 passed all 6/6 Task scenarios with resume
   disabled; `task_id` rejection before upstream and fresh fallback both passed.
+- Installed OpenCode 1.18.25 and exact 1.18.18 each passed the real permission-
+  engine scenario for exact/descendant external reuse, separate Bash prompts,
+  an unrelated-scope ask, instance-wide second-session reuse despite that
+  session's agent-level deny, and privacy-safe lifecycle logs. This is not
+  visual permission-UI evidence.
 - Exact binary `/tmp/opencode/opencode-ai-1.18.18/node_modules/.bin/opencode`
   resolved to
   `/tmp/opencode/opencode-ai-1.18.18/node_modules/opencode-ai/bin/opencode.exe`.
-  The exact baseline accepted its six-name manifest with 6 passed, 0 failed, and
-  0 skipped; the resume scenario was enabled.
+  The exact baseline accepted its six-name Task manifest plus one permission
+  scenario with 7 passed, 0 failed, and 0 skipped; the resume scenario was
+  enabled.
 - Its sixth scenario obtained `task_id` from the root model-visible Task result,
   cross-checked the actual child, proved the identical package write was blocked
   before renewed preflight with zero SSH/SFTP preparation, then completed one
@@ -882,7 +922,7 @@ Final verified 2026-08-28 evidence is:
 - Installed 1.18.25 fresh Task and exact 1.18.18 fresh/resume paths accepted the
   normal TUI-shaped omitted root permission overlay while retaining explicit
   child permission arrays. This API-shaped evidence is not a visual TUI gate.
-- `npm test` passed 32 unit/integration files and 456/456 tests, then 2 smoke
+- `npm test` passed 33 unit/integration files and 462/462 tests, then 2 smoke
   files/tests passed 2/2.
 - `npm pack --dry-run` passed with 165 files listed, and `git diff --check`
   passed.
