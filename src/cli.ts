@@ -25,6 +25,11 @@ import { safeStartupErrorCode } from "./opencode-probe.js"
 import { readPackageMetadata } from "./package-metadata.js"
 import { spawnManaged, type ManagedProcess, type ProcessResult } from "./process.js"
 import {
+  createRawStderrCapture,
+  type RawStderrCapture,
+  type RawStderrCaptureSummary,
+} from "./raw-stderr-capture.js"
+import {
   confirmReadyHandshakeStability,
   removeReadyFile,
   ReadyHandshakeTimeoutError,
@@ -95,8 +100,17 @@ export interface LauncherDiagnosticsContext {
   startupID: string
 }
 
+export interface LauncherRawStderrCaptureContext
+  extends RawStderrCaptureSummary {
+  startupID: string
+  settlementConfirmed: boolean
+}
+
 export interface LauncherHooks extends OpenCodeCompatibilityHooks {
   onDiagnosticsAvailable?: (context: LauncherDiagnosticsContext) => void
+  onRawStderrCaptureFinalized?: (
+    context: LauncherRawStderrCaptureContext
+  ) => void
 }
 
 export async function runLauncherCleanup(
@@ -166,6 +180,8 @@ export async function runCli(
 
   let master: ControlMaster | undefined
   let openCode: ManagedProcess | undefined
+  let rawStderrCapture: RawStderrCapture | undefined
+  let openCodeSettlementConfirmed = false
   let readyPath: string | undefined
   let socketPath: string | undefined
   let mirrorPath: string | undefined
@@ -402,14 +418,22 @@ export async function runCli(
       diagnosticLaunchID,
       diagnosticTargetID
     )
+    rawStderrCapture = createLauncherRawStderrCapture(env, diagnostics.startupID)
     const launchedOpenCode = spawnManaged(opencodeBinary, [], {
       cwd: paths.workspaceDir,
       env: childEnv,
       signal: controller.signal,
       terminationMode: "process-group",
-      stdio: { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+      maxStderrBytes: 0,
+      onStderr: rawStderrCapture.accept,
+      closeCapturedOutputOnExit: true,
+      stdio: { stdin: "inherit", stdout: "inherit", stderr: "capture" },
     })
     openCode = launchedOpenCode
+    const launchedOpenCodeSettlement = launchedOpenCode.wait().then((result) => {
+      openCodeSettlementConfirmed = true
+      return result
+    })
     await logLauncher(
       diagnostics,
       "info",
@@ -424,8 +448,7 @@ export async function runCli(
       controller.signal,
       readinessController.signal,
     ])
-    const openCodeCompletion = launchedOpenCode
-      .wait()
+    const openCodeCompletion = launchedOpenCodeSettlement
       .then((result) => ({ kind: "opencode" as const, result }))
     stage = "ready-wait"
     await logLauncher(
@@ -522,7 +545,7 @@ export async function runCli(
       )
     }
     const result =
-      active.kind === "opencode" ? active.result : await launchedOpenCode.wait()
+      active.kind === "opencode" ? active.result : await launchedOpenCodeSettlement
     void logLauncher(
       diagnostics,
       "info",
@@ -571,6 +594,7 @@ export async function runCli(
     opencode: openCode
       ? async () => {
           await openCode!.terminate()
+          openCodeSettlementConfirmed = true
         }
       : undefined,
     "ready-marker": readyPath
@@ -611,6 +635,15 @@ export async function runCli(
   )
   if (cleanupFailures.length > 0) await cleanupLog
   else void cleanupLog
+
+  await settleAndReportRawStderrCapture(
+    rawStderrCapture,
+    openCodeSettlementConfirmed,
+    diagnostics,
+    compatibilityHooks,
+    diagnosticLaunchID,
+    diagnosticTargetID
+  )
 
   const receivedSignalCode =
     receivedSignal === "SIGINT" ? 130 : receivedSignal === "SIGTERM" ? 143 : undefined
@@ -851,6 +884,111 @@ function currentLogFilePath(context: LauncherDiagnosticsContext): string {
   return resolveDailyLogFilePath({ logDirectory: context.logDirectory })
 }
 
+async function settleAndReportRawStderrCapture(
+  capture: RawStderrCapture | undefined,
+  openCodeSettlementConfirmed: boolean,
+  diagnostics: LauncherDiagnostics,
+  hooks: LauncherHooks,
+  launchID?: string,
+  targetID?: string
+): Promise<void> {
+  if (!capture) return
+
+  try {
+    const summary = await (openCodeSettlementConfirmed
+      ? capture.finalize()
+      : capture.discard())
+    const storageFailed = rawStderrStorageFailed(summary.storageStatus)
+    const captureFailed = !openCodeSettlementConfirmed || storageFailed
+    if (summary.observedBytes > 0 || captureFailed) {
+      await logLauncher(
+        diagnostics,
+        captureFailed ? "error" : "info",
+        captureFailed
+          ? "opencode.host.stderr.capture_failed"
+          : "opencode.host.stderr.captured",
+        {
+          observedBytes: summary.observedBytes,
+          capturedBytes: summary.capturedBytes,
+          writtenBytes: summary.writtenBytes,
+          truncated: summary.truncated,
+          storageStatus: summary.storageStatus,
+          retentionStatus: summary.retentionStatus,
+          settlementConfirmed: openCodeSettlementConfirmed,
+        },
+        launchID,
+        targetID
+      )
+    }
+    if (summary.retentionStatus === "failed") {
+      await logLauncher(
+        diagnostics,
+        "error",
+        "opencode.host.stderr.retention_failed",
+        { retentionStatus: summary.retentionStatus },
+        launchID,
+        targetID
+      )
+    }
+
+    try {
+      hooks.onRawStderrCaptureFinalized?.({
+        ...summary,
+        startupID: diagnostics.startupID,
+        settlementConfirmed: openCodeSettlementConfirmed,
+      })
+    } catch {
+      // Operator reporting is best-effort diagnostics only.
+    }
+  } catch {
+    // Capture finalization must never replace launch or cleanup behavior.
+  }
+}
+
+function createLauncherRawStderrCapture(
+  env: NodeJS.ProcessEnv,
+  startupID: string
+): RawStderrCapture {
+  try {
+    return createRawStderrCapture({ env, startupID })
+  } catch {
+    return createDiscardingRawStderrCapture()
+  }
+}
+
+function createDiscardingRawStderrCapture(): RawStderrCapture {
+  let observedBytes = 0
+  let settlement: Promise<RawStderrCaptureSummary> | undefined
+  const settle = (): Promise<RawStderrCaptureSummary> => {
+    settlement ??= Promise.resolve({
+      observedBytes,
+      capturedBytes: 0,
+      writtenBytes: 0,
+      truncated: observedBytes > 0,
+      storageStatus: observedBytes > 0 ? "capture-failed" : "empty",
+      retentionStatus: "not-attempted",
+    })
+    return settlement
+  }
+  return {
+    accept(chunk) {
+      if (settlement || !Buffer.isBuffer(chunk)) return
+      observedBytes = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        observedBytes + chunk.byteLength
+      )
+    },
+    finalize: settle,
+    discard: settle,
+  }
+}
+
+function rawStderrStorageFailed(
+  status: RawStderrCaptureSummary["storageStatus"]
+): boolean {
+  return status !== "empty" && status !== "complete"
+}
+
 function masterBeforeReadyError(result: ProcessResult): Error {
   return new Error(
     `SSH ControlMaster exited before the remote plugin became ready (${describeExit(result)})`
@@ -915,6 +1053,49 @@ async function main(): Promise<void> {
     process.exitCode = await runCli(process.argv.slice(2), process.env, {
       onDiagnosticsAvailable: (context) => {
         diagnostics = context
+      },
+      onRawStderrCaptureFinalized: (context) => {
+        if (context.filePath) {
+          if (context.storageStatus === "complete") {
+            process.stderr.write(
+              `opencode-ssh: raw OpenCode stderr saved to ${context.filePath} (startupID ${context.startupID}; observed ${context.observedBytes} bytes; captured ${context.capturedBytes} bytes; written ${context.writtenBytes} bytes; truncated ${context.truncated})\n`
+            )
+          } else {
+            process.stderr.write(
+              `opencode-ssh: warning: partial raw OpenCode stderr retained at ${context.filePath} (startupID ${context.startupID}; status ${context.storageStatus}; observed ${context.observedBytes} bytes; captured ${context.capturedBytes} bytes; written ${context.writtenBytes} bytes; truncated ${context.truncated})\n`
+            )
+          }
+        }
+
+        const settlementWarning = !context.settlementConfirmed
+        const storageWarning =
+          context.settlementConfirmed &&
+          !context.filePath &&
+          rawStderrStorageFailed(context.storageStatus)
+        const retentionWarning = context.retentionStatus === "failed"
+        if (!settlementWarning && !storageWarning && !retentionWarning) return
+        const diagnosticDetail = diagnostics
+          ? `; diagnostics: ${currentLogFilePath(diagnostics)}`
+          : ""
+        const warnings: string[] = []
+        if (settlementWarning) {
+          warnings.push(
+            "OpenCode settlement was not confirmed; raw stderr was discarded"
+          )
+        }
+        if (storageWarning) {
+          warnings.push(
+            context.observedBytes > 0
+              ? "raw OpenCode stderr was observed but could not be saved"
+              : "raw OpenCode stderr could not be saved"
+          )
+        }
+        if (retentionWarning) {
+          warnings.push("raw stderr retention maintenance failed")
+        }
+        process.stderr.write(
+          `opencode-ssh: warning: ${warnings.join("; ")} (startupID ${context.startupID}${diagnosticDetail})\n`
+        )
       },
       writeProgress: (message) => process.stderr.write(`opencode-ssh: ${message}\n`),
       writeWarning: (message) => process.stderr.write(`opencode-ssh: warning: ${message}\n`),

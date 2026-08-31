@@ -131,11 +131,51 @@ never raw-fetches `PluginInput.serverUrl` or trusts fallback localhost:4096. Do
 not claim that this second check precedes all SSH.
 
 If launch fails after diagnostics were successfully written, the CLI may show a
-local diagnostic path and `startupID`. Log lookup is operator-side local
-troubleshooting only. It is not a child project workflow, remote preflight, or
-verification source; a child must not substitute those logs for `remote_status`,
-SSH-backed tools, or remote file/diff inspection. Do not expose or transmit the
-local diagnostic file as project context.
+local structured-JSONL diagnostic path and `startupID`. Those records contain
+privacy-safe classifications and correlation, not raw host stderr. Log lookup is
+operator-side local troubleshooting only. It is not a child project workflow,
+remote preflight, or verification source; a child must not substitute those logs
+for `remote_status`, SSH-backed tools, or remote file/diff inspection.
+
+Separately, the launcher always intercepts the production OpenCode host's stderr
+while leaving TUI stdin/stdout on the terminal. Host fd 2 is a pipe and is not
+inherited by the terminal. The launcher keeps the exact first 1 MiB delivered to
+it before pipe closure, not every byte the host or its process tree may have
+written. Forced closure can lose unread buffered bytes or a direct-host or
+inheriting-descendant tail. Source-unit exactness covers only bytes delivered to
+`accept`; automated launcher capture/routing tests and visual validation of the
+real default TUI in a PTY are separate. The real visual gate remains pending.
+
+Interception is immediate, but persistence is never per answer/chat. A non-empty
+raw prefix is attempted only after the entire TUI exits, the whole OpenCode
+process is confirmed settled, and critical cleanup completes. Unconfirmed
+settlement discards the in-memory bytes and records a privacy-safe failure. Raw
+files are best-effort artifacts written directly to an exclusive final name, so
+a write/close failure or abrupt loss can leave a partial `.bin`; `close` is not
+`fsync` or a power-loss guarantee. Operator output identifies detected partial
+storage without exposing raw content. Native storage cannot change the selected
+core result but pathological or non-local filesystem work can delay launcher
+process settlement. Retention removes only strict matching regular files older
+than the current-day-minus-four boundary; future-dated files, malformed names/
+dates, symlinks, directories, and stale files can remain. Deletion is not secure
+erasure, and there is no total storage bound.
+
+The raw binary is always enabled and unredacted. It can contain credentials,
+tokens, paths, project/provider/model content, arbitrary bytes, ANSI/OSC
+controls, and invalid UTF-8. Never ask the operator to read, `cat`, attach, share,
+or feed that file to this session, another model, a remote child, or project
+context. Any control-safe local inspection belongs solely to a trusted operator
+outside every model and remote-agent workflow.
+
+This interception covers only bytes delivered from host fd 2 and descendants
+inheriting it before pipe closure. It does not capture OpenCode stdout or
+`/dev/tty` and cannot prevent an unrelated same-terminal writer or input/mouse-
+protocol corruption. Host stderr is not a TTY and `process.stderr.isTTY` is
+falsy, commonly `undefined`, so third-party color/progress behavior can change
+and an interactive prompt incorrectly sent to stderr can be hidden. Do not infer
+full terminal isolation from a clean TUI. Keep this raw mechanism distinct from
+privacy-safe ControlMaster line classification and failed package SSH/SFTP
+result classification.
 
 Permission timing matters. Incomplete preflight rejects package project tools
 before path resolution, baseline reads, SSH/SFTP preparation, or tool-specific

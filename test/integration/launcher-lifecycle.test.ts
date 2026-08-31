@@ -1,11 +1,25 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { afterEach, describe, expect, it } from "vitest"
-import { runCli } from "../../src/cli.js"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import {
+  runCli,
+  type LauncherRawStderrCaptureContext,
+} from "../../src/cli.js"
 import { REMOTE_ENV } from "../../src/config.js"
 import { resolveDailyLogFilePath } from "../../src/logger.js"
+import { spawnProcess } from "../../src/process.js"
+import { RAW_STDERR_CAPTURE_MAX_BYTES } from "../../src/raw-stderr-capture.js"
 import { computeTargetID } from "../../src/runtime-paths.js"
 import { TASK_RESUME_PROTOCOL } from "../../src/task-resume-capability.js"
 import { scrubFixtureEnvironment } from "../helpers/fixture-environment.js"
@@ -16,6 +30,7 @@ const fakeOpenCodeDebug = fileURLToPath(
 )
 const fakeSftp = fileURLToPath(new URL("../fixtures/bin/sftp", import.meta.url))
 const fakeSsh = fileURLToPath(new URL("../fixtures/bin/ssh", import.meta.url))
+const cliEntrypoint = fileURLToPath(new URL("../../dist/cli.js", import.meta.url))
 const safetyInstructionsPath = fileURLToPath(
   new URL("../../opencode-ssh-remote-use/opencode-ssh-safety.md", import.meta.url)
 )
@@ -46,6 +61,9 @@ describe("launcher lifecycle", () => {
   it("scrubs hostile ambient fake controls from the launcher fixture", async () => {
     const hostile = {
       FAKE_OPENCODE_IGNORE_SIGTERM: "1",
+      FAKE_OPENCODE_HOST_DESCENDANT_READY_MARKER: "/ambient/descendant-ready",
+      FAKE_OPENCODE_HOST_STDERR_BASE64: "YW1iaWVudCBwcml2YXRlIGJ5dGVz",
+      FAKE_OPENCODE_HOST_STDERR_TEXT: "ambient private host stderr",
       FAKE_SFTP_DELAY_MS: "60000",
       FAKE_SSH_COMMAND_DELAY_MS: "60000",
       FAKE_SSH_MASTER_STDERR: "ambient private diagnostic",
@@ -190,6 +208,347 @@ describe("launcher lifecycle", () => {
     expect(sshCalls.filter((call) => valueAfter(call, "-O") === "exit")).toHaveLength(2)
   })
 
+  it("inherits production stdout while keeping raw host stderr off the inherited terminal channel", async () => {
+    const stdoutMarker = "production-stdout-remains-inherited\n"
+    const stderrMarker = "private-production-stderr-marker\n"
+    const fixture = await createFixture("/srv/stdio-routing", {
+      FAKE_OPENCODE_WRITE_READY: "1",
+      FAKE_OPENCODE_HOST_STDOUT_TEXT: stdoutMarker,
+      FAKE_OPENCODE_HOST_STDERR_TEXT: stderrMarker,
+    })
+
+    const result = await spawnProcess(
+      process.execPath,
+      [cliEntrypoint, "stdio-routing-host", "/srv/requested"],
+      {
+        env: fixture.env,
+        maxStdoutBytes: 64 * 1024,
+        maxStderrBytes: 256 * 1024,
+        stdio: { stdin: "ignore", stdout: "capture", stderr: "capture" },
+      }
+    )
+
+    expect(result).toMatchObject({ exitCode: 0, signal: null })
+    expect(result.stdout).toBe(stdoutMarker)
+    expect(result.stderr).not.toContain(stderrMarker.trim())
+    const operatorLine = result.stderr
+      .split("\n")
+      .find((line) => line.startsWith("opencode-ssh: raw OpenCode stderr saved to "))
+    expect(operatorLine).toBeDefined()
+    const operatorMatch = operatorLine?.match(
+      /^opencode-ssh: raw OpenCode stderr saved to (.+) \(startupID ([a-f0-9]{32}); observed (\d+) bytes; captured (\d+) bytes; written (\d+) bytes; truncated (true|false)\)$/u
+    )
+    expect(operatorMatch).not.toBeNull()
+    if (!operatorMatch) throw new Error("Missing raw stderr operator report")
+
+    const rawPath = operatorMatch[1]
+    const markerBytes = Buffer.byteLength(stderrMarker)
+    expect(operatorMatch.slice(3)).toEqual([
+      String(markerBytes),
+      String(markerBytes),
+      String(markerBytes),
+      "false",
+    ])
+    expect(path.relative(fixture.stateHome, rawPath)).not.toMatch(/^\.\./u)
+    expect(await readFile(rawPath, "utf8")).toBe(stderrMarker)
+
+    const rawLog = await readFile(launcherLogPath(fixture), "utf8")
+    const records = parseJsonLines<LauncherLogRecord>(rawLog)
+    const captureRecord = records.find(
+      (record) => record.event === "opencode.host.stderr.captured"
+    )
+    expect(captureRecord?.fields).toMatchObject({
+      component: "launcher",
+      startupID: operatorMatch[2],
+      observedBytes: markerBytes,
+      capturedBytes: markerBytes,
+      writtenBytes: markerBytes,
+      truncated: false,
+    })
+    expect(captureRecord?.fields).not.toHaveProperty("filePath")
+    expect(rawLog).not.toContain(stderrMarker.trim())
+    expect(rawLog).not.toContain(rawPath)
+    expect(operatorLine).not.toContain(stderrMarker.trim())
+  }, 15_000)
+
+  it("retains exactly the bounded prefix and reports host stderr overflow safely", async () => {
+    const observedBytes = RAW_STDERR_CAPTURE_MAX_BYTES + 8_192
+    const fixture = await createFixture("/srv/stderr-overflow", {
+      FAKE_OPENCODE_WRITE_READY: "1",
+      FAKE_OPENCODE_HOST_STDERR_BYTES: String(observedBytes),
+    })
+
+    const result = await spawnProcess(
+      process.execPath,
+      [cliEntrypoint, "stderr-overflow-host", "/srv/requested"],
+      {
+        env: fixture.env,
+        maxStdoutBytes: 64 * 1024,
+        maxStderrBytes: 256 * 1024,
+        stdio: { stdin: "ignore", stdout: "capture", stderr: "capture" },
+      }
+    )
+
+    expect(result).toMatchObject({ exitCode: 0, signal: null })
+    const operatorLine = result.stderr
+      .split("\n")
+      .find((line) => line.startsWith("opencode-ssh: raw OpenCode stderr saved to "))
+    const operatorMatch = operatorLine?.match(
+      /^opencode-ssh: raw OpenCode stderr saved to (.+) \(startupID ([a-f0-9]{32}); observed (\d+) bytes; captured (\d+) bytes; written (\d+) bytes; truncated (true|false)\)$/u
+    )
+    expect(operatorMatch?.slice(3)).toEqual([
+      String(observedBytes),
+      String(RAW_STDERR_CAPTURE_MAX_BYTES),
+      String(RAW_STDERR_CAPTURE_MAX_BYTES),
+      "true",
+    ])
+    if (!operatorMatch) throw new Error("Missing overflow raw stderr report")
+
+    const rawPath = operatorMatch[1]
+    const rawBytes = await readFile(rawPath)
+    expect(rawBytes.byteLength).toBe(RAW_STDERR_CAPTURE_MAX_BYTES)
+    expect(rawBytes.equals(Buffer.alloc(RAW_STDERR_CAPTURE_MAX_BYTES, "x"))).toBe(true)
+    expect(result.stderr).not.toContain("xxxxxxxxxxxxxxxx")
+
+    const rawLog = await readFile(launcherLogPath(fixture), "utf8")
+    const records = parseJsonLines<LauncherLogRecord>(rawLog)
+    const captureRecord = records.find(
+      (record) => record.event === "opencode.host.stderr.captured"
+    )
+    expect(captureRecord?.fields).toMatchObject({
+      startupID: operatorMatch[2],
+      observedBytes,
+      capturedBytes: RAW_STDERR_CAPTURE_MAX_BYTES,
+      writtenBytes: RAW_STDERR_CAPTURE_MAX_BYTES,
+      truncated: true,
+      storageStatus: "complete",
+      retentionStatus: "completed",
+    })
+    expect(captureRecord?.fields).not.toHaveProperty("filePath")
+    expect(rawLog).not.toContain(rawPath)
+    expect(Buffer.byteLength(rawLog)).toBeLessThan(64 * 1024)
+  }, 15_000)
+
+  it("persists non-empty host stderr only after the host exits and cleanup settles", async () => {
+    const stderrMarker = "deferred-raw-stderr-marker\n"
+    const fixture = await createFixture("/srv/deferred-stderr", {
+      FAKE_OPENCODE_WRITE_READY: "1",
+      FAKE_OPENCODE_HOST_STDERR_TEXT: stderrMarker,
+      FAKE_OPENCODE_DELAY_MS: "1000",
+      FAKE_OPENCODE_ACTIVE_MARKER: "pending",
+      FAKE_OPENCODE_EXIT_MARKER: "pending",
+    })
+    const fixtureRoot = path.dirname(fixture.openCodeLog)
+    const activeMarker = path.join(fixtureRoot, "stderr-host-active")
+    const exitMarker = path.join(fixtureRoot, "stderr-host-exited")
+    fixture.env.FAKE_OPENCODE_ACTIVE_MARKER = activeMarker
+    fixture.env.FAKE_OPENCODE_EXIT_MARKER = exitMarker
+    const summaries: LauncherRawStderrCaptureContext[] = []
+    let hostHadExitedAtHook = false
+    let artifactPaths: string[] = []
+    let artifactsCleanedAtHook: boolean[] = []
+
+    const launch = runCli(
+      ["deferred-stderr-host", "/srv/requested"],
+      fixture.env,
+      {
+        onRawStderrCaptureFinalized: (summary) => {
+          hostHadExitedAtHook = existsSync(exitMarker)
+          artifactsCleanedAtHook = artifactPaths.map(
+            (artifactPath) => !existsSync(artifactPath)
+          )
+          summaries.push(summary)
+          throw new Error("operator reporting failed")
+        },
+      }
+    )
+    await expect.poll(() => pathExists(activeMarker), {
+      interval: 10,
+      timeout: 3_000,
+    }).toBe(true)
+    const [invocation] = parseJsonLines<OpenCodeInvocation>(
+      await readFile(fixture.openCodeLog, "utf8")
+    )
+    expect(existsSync(exitMarker)).toBe(false)
+    const readyPath = invocation.env[REMOTE_ENV.readyPath]
+    const mirrorPath = invocation.env[REMOTE_ENV.mirrorRoot]
+    const socketPath = invocation.env[REMOTE_ENV.socket]
+    const fakeMasterPath = `${socketPath}.fake-ssh-master`
+    expect([readyPath, mirrorPath, fakeMasterPath].map(existsSync)).toEqual([
+      true,
+      true,
+      true,
+    ])
+    await writeFile(socketPath, "fake control socket artifact", { mode: 0o600 })
+    expect(existsSync(socketPath)).toBe(true)
+    artifactPaths = [readyPath, mirrorPath, socketPath, fakeMasterPath]
+    const filesWhileActive = await listRegularFiles(fixture.stateHome)
+    expect(summaries).toEqual([])
+
+    await expect(launch).resolves.toBe(0)
+    expect(summaries).toHaveLength(1)
+    const summary = summaries[0]
+    expect(summary?.filePath).toEqual(expect.any(String))
+    if (!summary?.filePath) throw new Error("Missing finalized raw stderr path")
+    expect(hostHadExitedAtHook).toBe(true)
+    expect(artifactsCleanedAtHook).toEqual([true, true, true, true])
+    expect(filesWhileActive).not.toContain(summary.filePath)
+    expect(await readFile(summary.filePath, "utf8")).toBe(stderrMarker)
+  }, 10_000)
+
+  it("creates no raw file or capture event for empty production stderr", async () => {
+    const fixture = await createFixture("/srv/empty-stderr", {
+      FAKE_OPENCODE_WRITE_READY: "1",
+    })
+    const summaries: LauncherRawStderrCaptureContext[] = []
+
+    await expect(
+      runCli(["empty-stderr-host", "/srv/requested"], fixture.env, {
+        onRawStderrCaptureFinalized: (summary) => summaries.push(summary),
+      })
+    ).resolves.toBe(0)
+
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toMatchObject({
+      observedBytes: 0,
+      capturedBytes: 0,
+      writtenBytes: 0,
+      truncated: false,
+    })
+    expect(summaries[0]).not.toHaveProperty("filePath")
+    expect(await listRegularFiles(rawStderrDirectory(fixture))).toEqual([])
+    const records = parseJsonLines<LauncherLogRecord>(
+      await readFile(launcherLogPath(fixture), "utf8")
+    )
+    expect(
+      records.filter((record) => record.event.startsWith("opencode.host.stderr."))
+    ).toEqual([])
+  })
+
+  it("preserves a nonzero exit and prints only a safe warning when raw storage fails", async () => {
+    const stderrMarker = "storage-failure-private-stderr\n"
+    const fixture = await createFixture("/srv/raw-storage-failure", {
+      FAKE_OPENCODE_WRITE_READY: "1",
+      FAKE_OPENCODE_HOST_STDERR_TEXT: stderrMarker,
+      FAKE_OPENCODE_EXIT_CODE: "37",
+    })
+    const rawDirectory = rawStderrDirectory(fixture)
+    await mkdir(path.dirname(rawDirectory), { recursive: true })
+    await writeFile(rawDirectory, "blocks raw directory creation", { mode: 0o600 })
+
+    const result = await spawnProcess(
+      process.execPath,
+      [cliEntrypoint, "raw-storage-failure-host", "/srv/requested"],
+      {
+        env: fixture.env,
+        maxStdoutBytes: 64 * 1024,
+        maxStderrBytes: 256 * 1024,
+        stdio: { stdin: "ignore", stdout: "capture", stderr: "capture" },
+      }
+    )
+
+    expect(result).toMatchObject({ exitCode: 37, signal: null })
+    expect(result.stderr).toContain(
+      "warning: raw OpenCode stderr was observed but could not be saved"
+    )
+    expect(result.stderr).toContain("raw stderr retention maintenance failed")
+    expect(result.stderr).toMatch(/startupID [a-f0-9]{32}; diagnostics:/u)
+    expect(
+      result.stderr.split("\n").filter((line) => line.startsWith("opencode-ssh: warning:"))
+    ).toHaveLength(1)
+    expect(result.stderr).not.toContain(stderrMarker.trim())
+    expect(result.stderr).not.toContain("EEXIST")
+
+    const rawLog = await readFile(launcherLogPath(fixture), "utf8")
+    const records = parseJsonLines<LauncherLogRecord>(rawLog)
+    const failureRecord = records.find(
+      (record) => record.event === "opencode.host.stderr.capture_failed"
+    )
+    const retentionRecord = records.find(
+      (record) => record.event === "opencode.host.stderr.retention_failed"
+    )
+    expect(failureRecord?.fields).toMatchObject({
+      component: "launcher",
+      observedBytes: Buffer.byteLength(stderrMarker),
+      capturedBytes: Buffer.byteLength(stderrMarker),
+      writtenBytes: 0,
+      truncated: false,
+    })
+    expect(retentionRecord?.fields).toMatchObject({
+      component: "launcher",
+      retentionStatus: "failed",
+    })
+    expect(failureRecord?.fields).not.toHaveProperty("filePath")
+    expect(rawLog).not.toContain(stderrMarker.trim())
+    expect(rawLog).not.toContain(rawDirectory)
+  }, 15_000)
+
+  it("reports retention failure even when production stderr is empty", async () => {
+    const fixture = await createFixture("/srv/empty-retention-failure", {
+      FAKE_OPENCODE_WRITE_READY: "1",
+    })
+    const rawDirectory = rawStderrDirectory(fixture)
+    await mkdir(path.dirname(rawDirectory), { recursive: true })
+    await writeFile(rawDirectory, "blocks raw retention maintenance", {
+      mode: 0o600,
+    })
+
+    const result = await spawnProcess(
+      process.execPath,
+      [cliEntrypoint, "empty-retention-failure-host", "/srv/requested"],
+      {
+        env: fixture.env,
+        maxStdoutBytes: 64 * 1024,
+        maxStderrBytes: 256 * 1024,
+        stdio: { stdin: "ignore", stdout: "capture", stderr: "capture" },
+      }
+    )
+
+    expect(result).toMatchObject({ exitCode: 0, signal: null })
+    expect(result.stderr).toContain("warning: raw stderr retention maintenance failed")
+    expect(result.stderr).toMatch(/startupID [a-f0-9]{32}; diagnostics:/u)
+    expect(result.stderr).not.toContain("raw OpenCode stderr saved to")
+    expect(result.stderr).not.toContain("partial raw OpenCode stderr retained at")
+    const records = parseJsonLines<LauncherLogRecord>(
+      await readFile(launcherLogPath(fixture), "utf8")
+    )
+    expect(
+      records.filter(
+        (record) => record.event === "opencode.host.stderr.retention_failed"
+      )
+    ).toHaveLength(1)
+    expect(
+      records.filter((record) => record.event === "opencode.host.stderr.capture_failed")
+    ).toEqual([])
+  }, 15_000)
+
+  it("settles when a production descendant inherits and holds captured stderr", async () => {
+    const descendantMarker = "inherited-descendant-stderr\n"
+    const fixture = await createFixture("/srv/descendant-stderr", {
+      FAKE_OPENCODE_WRITE_READY: "1",
+      FAKE_OPENCODE_HOST_DESCENDANT_STDERR_TEXT: descendantMarker,
+      FAKE_OPENCODE_HOST_DESCENDANT_STDERR_HOLD_MS: "60000",
+    })
+    const descendantReadyMarker = path.join(
+      path.dirname(fixture.openCodeLog),
+      "descendant-stderr-ready"
+    )
+    fixture.env.FAKE_OPENCODE_HOST_DESCENDANT_READY_MARKER = descendantReadyMarker
+    const summaries: LauncherRawStderrCaptureContext[] = []
+
+    await expect(
+      runCli(["descendant-stderr-host", "/srv/requested"], fixture.env, {
+        onRawStderrCaptureFinalized: (summary) => summaries.push(summary),
+      })
+    ).resolves.toBe(0)
+
+    expect(await readFile(descendantReadyMarker, "utf8")).toMatch(/^\d+\n$/u)
+    const rawPath = summaries[0]?.filePath
+    expect(rawPath).toEqual(expect.any(String))
+    if (!rawPath) throw new Error("Missing descendant raw stderr path")
+    expect((await readFile(rawPath, "utf8")).startsWith(descendantMarker)).toBe(true)
+  }, 10_000)
+
   it("fails closed quickly when OpenCode exits without becoming ready", async () => {
     const alias = "unready-host"
     const fixture = await createFixture("/srv/unready", {
@@ -275,8 +634,10 @@ describe("launcher lifecycle", () => {
   }, 15_000)
 
   it("preserves SIGTERM exit semantics and warns when cleanup is incomplete", async () => {
+    const stderrMarker = "sigterm-cleanup-private-stderr\n"
     const fixture = await createFixture("/srv/signal-cleanup-failure", {
       FAKE_OPENCODE_WRITE_READY: "1",
+      FAKE_OPENCODE_HOST_STDERR_TEXT: stderrMarker,
       FAKE_OPENCODE_DELAY_MS: "2000",
       FAKE_OPENCODE_ACTIVE_MARKER: "pending",
     })
@@ -284,10 +645,14 @@ describe("launcher lifecycle", () => {
     fixture.env.FAKE_OPENCODE_ACTIVE_MARKER = activeMarker
     const previousListeners = new Set(process.listeners("SIGTERM"))
     const warnings: string[] = []
+    const summaries: LauncherRawStderrCaptureContext[] = []
     const launch = runCli(
       ["signal-cleanup-failure-host", "/srv/requested"],
       fixture.env,
-      { writeWarning: (message) => warnings.push(message) }
+      {
+        onRawStderrCaptureFinalized: (summary) => summaries.push(summary),
+        writeWarning: (message) => warnings.push(message),
+      }
     )
     await expect.poll(() => pathExists(activeMarker), {
       interval: 10,
@@ -310,17 +675,160 @@ describe("launcher lifecycle", () => {
     expect(warnings).toEqual([
       expect.stringMatching(/cleanup after SIGTERM was incomplete.*ready-marker/i),
     ])
+    const rawPath = summaries[0]?.filePath
+    expect(rawPath).toEqual(expect.any(String))
+    if (!rawPath) throw new Error("Missing SIGTERM raw stderr path")
+    expect(await readFile(rawPath, "utf8")).toBe(stderrMarker)
   }, 10_000)
 
-  it("accepts a valid ready handshake written immediately before OpenCode exits", async () => {
+  it.skipIf(process.platform === "win32")(
+    "discards raw stderr when managed host settlement is unconfirmed",
+    async () => {
+      const stderrMarker = "unconfirmed-settlement-private-stderr\n"
+      const fixture = await createFixture("/srv/unconfirmed-settlement", {
+        FAKE_OPENCODE_WRITE_READY: "1",
+        FAKE_OPENCODE_HOST_STDERR_TEXT: stderrMarker,
+        FAKE_OPENCODE_DELAY_MS: "2000",
+        FAKE_OPENCODE_ACTIVE_MARKER: "pending",
+        FAKE_OPENCODE_START_MARKER: "pending",
+      })
+      const fixtureRoot = path.dirname(fixture.openCodeLog)
+      const activeMarker = path.join(fixtureRoot, "unconfirmed-active")
+      const startMarker = path.join(fixtureRoot, "unconfirmed-started")
+      fixture.env.FAKE_OPENCODE_ACTIVE_MARKER = activeMarker
+      fixture.env.FAKE_OPENCODE_START_MARKER = startMarker
+      const previousListeners = new Set(process.listeners("SIGTERM"))
+      const warnings: string[] = []
+      const summaries: LauncherRawStderrCaptureContext[] = []
+      const launch = runCli(
+        ["unconfirmed-settlement-host", "/srv/requested"],
+        fixture.env,
+        {
+          onRawStderrCaptureFinalized: (summary) => summaries.push(summary),
+          writeWarning: (message) => warnings.push(message),
+        }
+      )
+      await expect.poll(() => pathExists(activeMarker), {
+        interval: 10,
+        timeout: 3_000,
+      }).toBe(true)
+      const hostPid = Number((await readFile(startMarker, "utf8")).trim())
+      expect(hostPid).toBeGreaterThan(0)
+      const signalFailure = Object.assign(new Error("injected signal failure"), {
+        code: "EPERM",
+      })
+      const originalKill = process.kill.bind(process)
+      let injected = false
+      const kill = vi.spyOn(process, "kill").mockImplementation(
+        ((pid: number, signal?: NodeJS.Signals | number) => {
+          if (!injected && pid === -hostPid && signal === "SIGTERM") {
+            injected = true
+            originalKill(pid, signal)
+            throw signalFailure
+          }
+          return originalKill(pid, signal)
+        }) as typeof process.kill
+      )
+      const signalListener = process
+        .listeners("SIGTERM")
+        .find((listener) => !previousListeners.has(listener))
+      expect(signalListener).toEqual(expect.any(Function))
+
+      let exitCode: number
+      try {
+        signalListener!("SIGTERM")
+        exitCode = await launch
+      } finally {
+        kill.mockRestore()
+      }
+
+      expect(exitCode).toBe(143)
+      expect(warnings).toEqual([
+        expect.stringMatching(/cleanup after SIGTERM was incomplete.*opencode/i),
+      ])
+      expect(summaries).toEqual([
+        expect.objectContaining({
+          observedBytes: Buffer.byteLength(stderrMarker),
+          capturedBytes: Buffer.byteLength(stderrMarker),
+          writtenBytes: 0,
+          storageStatus: "capture-failed",
+          retentionStatus: "not-attempted",
+          settlementConfirmed: false,
+        }),
+      ])
+      expect(summaries[0]).not.toHaveProperty("filePath")
+      expect(await listRegularFiles(rawStderrDirectory(fixture))).toEqual([])
+    }
+  )
+
+  it("preserves SIGINT exit semantics and settled host stderr", async () => {
+    const stderrMarker = "sigint-private-stderr\n"
+    const fixture = await createFixture("/srv/sigint-stderr", {
+      FAKE_OPENCODE_WRITE_READY: "1",
+      FAKE_OPENCODE_HOST_STDERR_TEXT: stderrMarker,
+      FAKE_OPENCODE_DELAY_MS: "2000",
+      FAKE_OPENCODE_ACTIVE_MARKER: "pending",
+    })
+    const activeMarker = path.join(path.dirname(fixture.openCodeLog), "sigint-active")
+    fixture.env.FAKE_OPENCODE_ACTIVE_MARKER = activeMarker
+    const previousListeners = new Set(process.listeners("SIGINT"))
+    const summaries: LauncherRawStderrCaptureContext[] = []
+    const launch = runCli(["sigint-stderr-host", "/srv/requested"], fixture.env, {
+      onRawStderrCaptureFinalized: (summary) => summaries.push(summary),
+    })
+    await expect.poll(() => pathExists(activeMarker), {
+      interval: 10,
+      timeout: 3_000,
+    }).toBe(true)
+    const signalListener = process
+      .listeners("SIGINT")
+      .find((listener) => !previousListeners.has(listener))
+    expect(signalListener).toEqual(expect.any(Function))
+
+    signalListener!("SIGINT")
+
+    await expect(launch).resolves.toBe(130)
+    const rawPath = summaries[0]?.filePath
+    expect(rawPath).toEqual(expect.any(String))
+    if (!rawPath) throw new Error("Missing SIGINT raw stderr path")
+    expect(await readFile(rawPath, "utf8")).toBe(stderrMarker)
+  }, 10_000)
+
+  it("preserves binary stderr and a nonzero immediate exit after readiness", async () => {
+    const stderrBytes = Buffer.from([
+      0xff,
+      0xfe,
+      0x00,
+      0x1b,
+      0x5b,
+      0x33,
+      0x31,
+      0x6d,
+      0x0a,
+    ])
     const fixture = await createFixture("/srv/immediate-ready", {
       FAKE_OPENCODE_WRITE_READY: "1",
+      FAKE_OPENCODE_HOST_STDERR_BASE64: stderrBytes.toString("base64"),
       FAKE_OPENCODE_EXIT_CODE: "23",
     })
+    const summaries: LauncherRawStderrCaptureContext[] = []
 
     await expect(
-      runCli(["immediate-ready-host", "/srv/requested"], fixture.env)
+      runCli(["immediate-ready-host", "/srv/requested"], fixture.env, {
+        onRawStderrCaptureFinalized: (summary) => summaries.push(summary),
+      })
     ).resolves.toBe(23)
+    const summary = summaries[0]
+    expect(summary).toMatchObject({
+      observedBytes: stderrBytes.byteLength,
+      capturedBytes: stderrBytes.byteLength,
+      writtenBytes: stderrBytes.byteLength,
+      truncated: false,
+      storageStatus: "complete",
+    })
+    expect(summary?.filePath).toEqual(expect.any(String))
+    if (!summary?.filePath) throw new Error("Missing binary raw stderr path")
+    expect(await readFile(summary.filePath)).toEqual(stderrBytes)
   })
 
   it("terminates OpenCode promptly and reports a pre-ready ControlMaster exit", async () => {
@@ -367,10 +875,11 @@ describe("launcher lifecycle", () => {
     )
   }, 10_000)
 
-  it("logs safe active ControlMaster diagnostics without retaining raw stderr", async () => {
+  it("keeps ControlMaster diagnostics out of raw host stderr", async () => {
     const alias = "private-diagnostic-host"
     const canonicalWorkdir = "/srv/private-diagnostic-workdir"
     const privateDetail = "private.example /secret/path"
+    const hostStderrMarker = "distinct-host-stderr-marker\n"
     const diagnosticLines = Array.from(
       { length: 66 },
       (_, index) =>
@@ -380,11 +889,25 @@ describe("launcher lifecycle", () => {
       FAKE_OPENCODE_WRITE_READY: "1",
       FAKE_OPENCODE_DELAY_MS: "1000",
       FAKE_OPENCODE_EXIT_CODE: "0",
+      FAKE_OPENCODE_HOST_STDERR_TEXT: hostStderrMarker,
       FAKE_SSH_MASTER_STDERR: diagnosticLines,
       FAKE_SSH_MASTER_STDERR_DELAY_MS: "600",
     })
+    const summaries: LauncherRawStderrCaptureContext[] = []
 
-    await expect(runCli([alias, "/srv/requested"], fixture.env)).resolves.toBe(0)
+    await expect(
+      runCli([alias, "/srv/requested"], fixture.env, {
+        onRawStderrCaptureFinalized: (summary) => summaries.push(summary),
+      })
+    ).resolves.toBe(0)
+
+    const rawPath = summaries[0]?.filePath
+    expect(rawPath).toEqual(expect.any(String))
+    if (!rawPath) throw new Error("Missing diagnostic-routing raw stderr path")
+    const rawHostStderr = await readFile(rawPath, "utf8")
+    expect(rawHostStderr).toBe(hostStderrMarker)
+    expect(rawHostStderr).not.toContain(privateDetail)
+    expect(rawHostStderr).not.toContain("channel 1")
 
     const logPath = resolveDailyLogFilePath({
       logDirectory: path.join(fixture.stateHome, "opencode-ssh", "logs"),
@@ -417,6 +940,8 @@ describe("launcher lifecycle", () => {
     ])
     expect(rawLog).not.toContain(privateDetail)
     expect(rawLog).not.toContain("channel 1")
+    expect(rawLog).not.toContain(hostStderrMarker.trim())
+    expect(rawLog).not.toContain(rawPath)
     expect(rawLog).not.toContain(alias)
     expect(rawLog).not.toContain(canonicalWorkdir)
   }, 10_000)
@@ -491,9 +1016,11 @@ describe("launcher lifecycle", () => {
   it("runs the installed-style self-test without starting SSH", async () => {
     const fixture = await createFixture("/srv/unused")
     const progress: string[] = []
+    const summaries: LauncherRawStderrCaptureContext[] = []
 
     await expect(
       runCli(["self-test"], fixture.env, {
+        onRawStderrCaptureFinalized: (summary) => summaries.push(summary),
         writeProgress: (message) => progress.push(message),
       })
     ).resolves.toBe(0)
@@ -501,6 +1028,8 @@ describe("launcher lifecycle", () => {
     expect(progress.at(-1)).toBe(
       "self-test passed (OpenCode 1.18.18; Task resume enabled)"
     )
+    expect(summaries).toEqual([])
+    expect(await listRegularFiles(rawStderrDirectory(fixture))).toEqual([])
     expect(await pathExists(fixture.sshLog)).toBe(false)
     expect(await pathExists(fixture.openCodeLog)).toBe(false)
   })
@@ -603,6 +1132,37 @@ function parseJsonLines<T>(contents: string): T[] {
     .map((line) => JSON.parse(line) as T)
 }
 
+function launcherLogPath(fixture: LauncherFixture): string {
+  return resolveDailyLogFilePath({
+    logDirectory: path.join(fixture.stateHome, "opencode-ssh", "logs"),
+  })
+}
+
+function rawStderrDirectory(fixture: LauncherFixture): string {
+  return path.join(fixture.stateHome, "opencode-ssh", "logs", "raw")
+}
+
+async function listRegularFiles(root: string): Promise<string[]> {
+  let entries: string[]
+  try {
+    entries = await readdir(root, { recursive: true })
+  } catch (error) {
+    if (errnoIs(error, "ENOENT")) return []
+    throw error
+  }
+
+  const files: string[] = []
+  for (const entry of entries) {
+    const entryPath = path.join(root, entry)
+    try {
+      if ((await stat(entryPath)).isFile()) files.push(entryPath)
+    } catch (error) {
+      if (!errnoIs(error, "ENOENT")) throw error
+    }
+  }
+  return files.sort()
+}
+
 async function pathExists(filePath: string): Promise<boolean> {
   return stat(filePath).then(
     () => true,
@@ -613,4 +1173,13 @@ async function pathExists(filePath: string): Promise<boolean> {
 function valueAfter(args: string[], flag: string): string | undefined {
   const index = args.indexOf(flag)
   return index === -1 ? undefined : args[index + 1]
+}
+
+function errnoIs(error: unknown, code: string): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === code
+  )
 }

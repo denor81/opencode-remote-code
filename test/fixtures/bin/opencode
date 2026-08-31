@@ -5,6 +5,7 @@ import { spawn } from "node:child_process"
 import {
   appendFileSync,
   chmodSync,
+  existsSync,
   readFileSync,
   renameSync,
   writeFileSync,
@@ -143,8 +144,54 @@ if (activeMarker) {
   )
 }
 
+const hostOutputDelayMs = configuredNumber(
+  "FAKE_OPENCODE_HOST_STDERR_DELAY_MS",
+  0
+)
+if (hostOutputDelayMs > 0) {
+  await new Promise((resolve) => setTimeout(resolve, hostOutputDelayMs))
+}
+
+const hostStdout = process.env.FAKE_OPENCODE_HOST_STDOUT_TEXT ?? ""
+if (hostStdout) await writeOutput(process.stdout, hostStdout)
+
+const hostStderrText = process.env.FAKE_OPENCODE_HOST_STDERR_TEXT ?? ""
+const hostStderrBase64 = process.env.FAKE_OPENCODE_HOST_STDERR_BASE64
+const hostStderrBytes = configuredNumber("FAKE_OPENCODE_HOST_STDERR_BYTES", 0)
+if (hostStderrText) await writeOutput(process.stderr, hostStderrText)
+if (hostStderrBase64 !== undefined) {
+  await writeOutput(process.stderr, Buffer.from(hostStderrBase64, "base64"))
+}
+if (hostStderrBytes > 0) {
+  await writeOutput(process.stderr, Buffer.alloc(hostStderrBytes, "x"))
+}
+
+const descendantStderr = process.env.FAKE_OPENCODE_HOST_DESCENDANT_STDERR_TEXT
+if (descendantStderr !== undefined) {
+  const holdMs = configuredNumber(
+    "FAKE_OPENCODE_HOST_DESCENDANT_STDERR_HOLD_MS",
+    60_000
+  )
+  const descendantScript = [
+    "process.stderr.write(Buffer.from(process.env.FAKE_OPENCODE_HOST_DESCENDANT_STDERR_TEXT ?? '', 'utf8'), async (error) => { if (error) throw error; const marker = process.env.FAKE_OPENCODE_HOST_DESCENDANT_READY_MARKER; if (marker) { const { writeFileSync } = await import('node:fs'); writeFileSync(marker, String(process.pid) + '\\n') } })",
+    `setTimeout(() => process.exit(0), ${holdMs})`,
+  ].join(";")
+  const descendant = spawn(process.execPath, ["-e", descendantScript], {
+    stdio: ["ignore", "ignore", "inherit"],
+  })
+  const descendantPidFile = process.env.FAKE_OPENCODE_DESCENDANT_PID_FILE
+  if (descendantPidFile && descendant.pid) {
+    writeFileSync(descendantPidFile, `${descendant.pid}\n`)
+  }
+  const descendantReadyMarker =
+    process.env.FAKE_OPENCODE_HOST_DESCENDANT_READY_MARKER
+  if (descendantReadyMarker) await waitForFile(descendantReadyMarker, 5_000)
+}
+
 const delayMs = configuredNumber("FAKE_OPENCODE_DELAY_MS", 0)
 if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+const exitMarker = process.env.FAKE_OPENCODE_EXIT_MARKER
+if (exitMarker) writeFileSync(exitMarker, `${process.pid}\n`)
 process.exit(configuredNumber("FAKE_OPENCODE_EXIT_CODE", 0))
 
 function sha256(value) {
@@ -165,6 +212,25 @@ function configuredNumber(name, fallback) {
     throw new Error(`Fake OpenCode requires a non-negative integer for ${name}`)
   }
   return parsed
+}
+
+function writeOutput(stream, value) {
+  return new Promise((resolve, reject) => {
+    stream.write(value, (error) => {
+      if (error) reject(error)
+      else resolve()
+    })
+  })
+}
+
+async function waitForFile(filePath, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (!existsSync(filePath)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for fake OpenCode marker ${filePath}`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
 }
 
 function packageOpenCodeVersion() {

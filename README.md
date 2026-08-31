@@ -399,6 +399,8 @@ The launcher:
    workdir only after that target-free check passes.
 3. Creates the stable local OpenCode workspace and launches OpenCode with the
    safety instructions and package-root plugin in `OPENCODE_CONFIG_CONTENT`.
+   Stdin and stdout remain inherited for the normal TUI. Host fd 2 is a pipe
+   drained by the launcher and is not inherited by the terminal.
 4. Before claiming launch ownership, creating the plugin mirror, opening its SSH
    pool, or running bootstrap commands, the normal plugin again requires
    callable session lookup and matching runtime health/version through the host
@@ -407,8 +409,11 @@ The launcher:
    concurrent config batch before publishing one nonce-bound ready marker.
 6. Waits 25 ms after first observing ready, then re-reads and validates the same
    marker while continuing to supervise the ControlMaster.
-7. Supervises OpenCode and attempts cleanup of the ready marker, mirror, master,
-   socket, and signal listeners.
+7. Supervises OpenCode and confirms that the whole OpenCode process has settled,
+   then attempts critical cleanup of the ready marker, mirror, master, socket,
+   and signal listeners. Only after both boundaries may it attempt raw
+   host-stderr persistence. If OpenCode settlement cannot be confirmed, it
+   discards the in-memory capture and reports a privacy-safe failure instead.
 
 Within one loaded module, only one active production plugin factory may own a
 launch ID. Config failure and disposal are terminal. Disposal starts pool close
@@ -432,7 +437,9 @@ ${XDG_RUNTIME_DIR:-/tmp}/opencode-ssh-<uid>/
 
 ## Startup Diagnostics
 
-Startup diagnostics are best-effort JSON Lines at:
+### Structured JSONL
+
+Privacy-safe structured startup diagnostics are best-effort JSON Lines at:
 
 ```text
 ${XDG_STATE_HOME:-$HOME/.local/state}/opencode-ssh/logs/opencode-ssh-YYYY-MM-DD.jsonl
@@ -463,9 +470,10 @@ jq -c 'select(.fields.startupID == "<id>")' "<path>"
 ```
 
 Instrumentation is currently limited to compatibility version/probe, launcher
-SSH/canonicalization/OpenCode/ready/cleanup, probe health/marker, and production
-plugin lookup/health/source/version/mirror/pool/bootstrap/config/ready/disposal,
-plus one at-most-once-per-launch
+SSH/canonicalization/OpenCode/ready/cleanup and bounded host-stderr byte counts/
+status/truncation, probe health/marker, and production plugin lookup/health/
+source/version/mirror/pool/bootstrap/config/ready/disposal, plus one
+at-most-once-per-launch
 `plugin.task_root_permission.normalized` warning when an omitted caller-root
 permission overlay is accepted as empty. That warning carries only the standard
 correlation fields and is not per-call telemetry. A narrow external-directory
@@ -493,11 +501,13 @@ standard IDs and timestamp; concurrent channels cannot be joined one-to-one.
 Records correlate first by non-secret `startupID`, then `launchID` and
 `targetID`. `targetID` is the stable pseudonymous SHA-256 of alias plus canonical
 workdir. It is not secret and is not claimed irreversible against guessed alias/
-workdir inputs. Production emits stable failure codes and reviewed fields, not
-raw errors/messages. It never logs raw target alias/canonical workdir or project/
-local paths; commands or argv; environment/config; nonce/token/credential values
-or their hashes; session/task/permission IDs; output/response bodies; or model/
-provider data. The only displayed path is the local diagnostic path above.
+workdir inputs. Structured production diagnostics emit stable failure codes and
+reviewed fields, not raw errors/messages. They never log raw target alias/
+canonical workdir or project/local paths; commands or argv; environment/config;
+nonce/token/credential values or their hashes; session/task/permission IDs;
+output/response bodies; or model/provider data. They also contain no raw-capture
+path or bytes. The CLI-displayed JSONL path is local operator troubleshooting
+output, not a log field.
 
 Repository code can reuse `createFileLogger` from the relative `./logger.js`-
 style NodeNext path. Use stable event names matching
@@ -505,6 +515,89 @@ style NodeNext path. Use stable event names matching
 cleanup or disposal before awaiting a diagnostic write. This remains
 startup-focused diagnostics plus the explicitly documented narrow runtime
 boundaries above, not general successful project/tool/session telemetry.
+
+### Raw OpenCode Host Stderr
+
+The production OpenCode host inherits stdin and stdout for its normal TUI, but
+its fd 2 is a pipe drained by the launcher and is not inherited by the terminal.
+The launcher starts intercepting that pipe immediately and retains, in delivery
+order and without decoding, the exact first 1 MiB (1,048,576 bytes) delivered to
+the launcher before pipe closure.
+
+That scope is intentionally narrower than all bytes ever written by the host or
+its process tree. Forced pipe closure can lose unread buffered bytes or a direct-
+host or inheriting-descendant tail. Capture unit tests prove prefix exactness only
+for bytes delivered to `accept`; launcher integration tests exercise routing and
+lifecycle separately. Neither is the real default no-argument TUI/PTY visual
+gate, which remains pending until it is actually run.
+
+Interception is immediate while the TUI runs, but persistence is not per answer
+or chat. A persistence attempt occurs only after the entire TUI has exited, the
+launcher has confirmed that the whole OpenCode process settled, and critical
+cleanup has completed. If settlement cannot be confirmed, the launcher discards
+the in-memory capture and records a privacy-safe failure instead of publishing
+it.
+
+This raw capture is always enabled by explicit product decision; it is not an
+opt-in diagnostic. A non-empty, settlement-confirmed capture is stored on a
+best-effort basis at:
+
+```text
+${XDG_STATE_HOME:-$HOME/.local/state}/opencode-ssh/logs/raw/opencode-host-stderr-YYYY-MM-DD-<startupID>.bin
+```
+
+No raw file is created when no fd-2 bytes were delivered. Until finalization,
+captured bytes exist only in memory, so SIGKILL, power loss, or another abrupt
+launcher loss can discard them. Raw directories and files use `0700` and `0600`.
+The file is created exclusively and written directly at the final name, not
+through an atomic temporary-file rename. A write or close failure, or abrupt
+process loss during storage, can therefore leave a partial `.bin`. A detected
+partial store is identified in operator output with its path and confirmed byte
+count plus a safe warning. `close` is not `fsync`, so even an apparently complete
+close is not a power-loss durability guarantee.
+
+Raw retention prunes only regular files with a strictly matching basename and a
+valid embedded UTC date older than the current-day-minus-four boundary. It
+preserves the current day and previous four, future-dated files (including clock
+skew), malformed names or dates, symlinks, and directories. Stale matching files
+can remain when later maintenance does not run or fails. Deletion is not secure
+erasure, and there is no total storage bound.
+
+Native raw-storage and retention filesystem work starts only after critical
+cleanup and cannot change the already selected launch, signal, or cleanup
+result. It is still awaited: pathological or non-local filesystem work can delay
+launcher process settlement, so there is no universal bounded-return or
+cancellation guarantee.
+
+The file is a deliberate unredacted exception to the structured JSONL privacy
+rules. Its exact prefix can contain credentials, tokens, paths, project,
+provider, or model content, arbitrary binary bytes, ANSI/OSC terminal controls,
+and invalid UTF-8. Never `cat` it to a terminal, attach or share it casually, or
+feed it to a model, remote child, or project context. Inspect only in a trusted
+local environment with a control-safe representation such as:
+
+```bash
+hexdump -C -- <file>
+```
+
+Capture covers fd 2 of the OpenCode host and descendants that inherit that fd
+only to the extent bytes are delivered before the launcher closes the pipe. It
+provides no writer PID or source attribution, no preservation of write
+boundaries, and no universal process-tree settlement. Forced closure can lose
+unread pipe-buffer bytes and a direct-host or descendant tail.
+
+OpenCode stdout remains attached to the terminal and is not captured. Writes to
+stdout or `/dev/tty`, unrelated processes sharing the terminal, and input or
+mouse-protocol corruption can still affect the TUI. Redirecting host stderr also
+makes host stderr not a TTY: `process.stderr.isTTY` is falsy, commonly
+`undefined`. This can change color/progress behavior or hide a third-party prompt
+incorrectly written to stderr.
+
+Do not conflate the three mechanisms: ControlMaster stderr remains privacy-safe
+line classification, failed package SSH/SFTP transports remain bounded result
+classification, and only OpenCode host stderr receives raw bounded persistence.
+Structured JSONL records only bounded byte counts, status/truncation fields, and
+correlation for the raw capture; it stores neither raw bytes nor the raw path.
 
 ## Testing
 
@@ -545,7 +638,7 @@ evidence recorded on 2026-08-28 is:
   target-free self-test held valid health decoys on every resolved localhost
   loopback address at port 4096, saw zero connections and requests, and observed
   `client._client.get`. Real-serve production activation/disposal and correlated
-  startup logs also passed.
+  structured JSONL startup logs also passed.
 - Ordinary installed OpenCode 1.18.25 passed all 6/6 Task scenarios. Resume was
   disabled, every `task_id` was rejected before upstream execution, and the
   fresh-Task fallback passed.

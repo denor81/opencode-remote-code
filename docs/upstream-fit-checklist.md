@@ -133,15 +133,16 @@ For a reviewed local test profile:
    jq -c 'select(.fields.startupID == "<id>")' "<path>"
    ```
 
-5. Confirm records correlate by `startupID`, then `launchID`/`targetID`, and
-   contain only the documented startup components, stable failure codes, and
-   allowlisted fields. Confirm `targetID` is the stable pseudonymous SHA-256 of
-   alias plus canonical workdir; do not call it secret or irreversible against
-   guessed inputs.
-6. Confirm records contain no raw target alias/canonical workdir or project/local
-   path, command/argv, environment/config, nonce/token/credential value or its
-   hash, session/task/permission ID, output/response body, or model/provider data.
-   The CLI-displayed local path is troubleshooting output, not a log field.
+5. Confirm structured records correlate by `startupID`, then `launchID`/
+   `targetID`, and contain only the documented startup components, stable failure
+   codes, and allowlisted fields. Confirm `targetID` is the stable pseudonymous
+   SHA-256 of alias plus canonical workdir; do not call it secret or irreversible
+   against guessed inputs.
+6. Confirm structured records contain no raw target alias/canonical workdir or
+   project/local path, command/argv, environment/config, nonce/token/credential
+   value or its hash, session/task/permission ID, output/response body, model/
+   provider data, or raw host-stderr bytes/path. The CLI-displayed JSONL path is
+   troubleshooting output, not a log field.
 7. Treat the 500 ms local-I/O value as a caller deadline, not cancellation of a
    native filesystem request or universal process settlement. Verify logging
    failure does not replace the core result and critical cleanup/disposal starts
@@ -156,15 +157,122 @@ For a reviewed local test profile:
    same-scope repeat-after-`always` and bounded diagnostics-limit warnings. No
    path, pattern, metadata, or host permission ID may appear.
 10. Make the fake ControlMaster emit split and repeated `channel N: open failed`
-    stderr while OpenCode is active. Verify no raw line reaches inherited TUI
-    stderr, the first 64 messages become bounded `ssh.master.*` records, and one
-    limit warning follows. Confirm no channel number, detail, alias, or path is
-    retained.
+    stderr while OpenCode is active. Verify no raw line reaches the terminal/TUI,
+    the first 64 messages become bounded `ssh.master.*` records, and one limit
+    warning follows. Confirm no channel number, detail, alias, or path is
+    retained. This classified master pipe is not the raw OpenCode-host capture.
 11. Fail one direct SSH-backed package operation and one SFTP-backed operation.
     Verify `plugin.ssh.transport.failed` records the correct concurrent
     top-level operation and transport without commands, paths, output, or raw
     errors. Treat the correlated timestamps and launch IDs as candidate matching,
     not proof that an internal OpenSSH channel number belongs to one operation.
+
+## OpenCode Host Stderr Capture Check
+
+These are pending validation requirements for the always-enabled raw capture.
+Record each result explicitly; the historical evidence above does not mark any
+of these new checks as passed. Use only generated non-secret fixture bytes. Never
+`cat` a resulting binary to a terminal, attach it casually, or provide it to a
+model, remote child, or project context. Inspect with a control-safe rendering
+such as `hexdump -C -- <file>`.
+
+Keep three evidence levels distinct. Capture source-unit tests can prove exactness
+only for bytes delivered to the capture's `accept` boundary. Launcher integration
+tests can prove fixture routing, settlement, cleanup, and storage behavior. Only
+the manual production launcher plus default no-argument TUI in a real PTY can
+provide the pending visual evidence; neither automated level substitutes for it.
+
+### Automated Boundary
+
+1. At the source-unit boundary, deliver a known byte sequence to `accept` that
+   contains ordinary text, split ANSI and OSC controls, NUL, invalid UTF-8, and
+   boundaries split across calls. Verify the stored bytes are identical and in
+   delivery order. Do not reinterpret this as proof about host bytes that were
+   written but never delivered to the launcher, or as writer/write-boundary
+   metadata.
+2. Deliver more than 1 MiB to `accept` and verify the file is exactly 1,048,576
+   bytes containing the exact first 1 MiB delivered to the launcher before pipe
+   closure, with no decoding or re-encoding. Cover chunks that cross the limit.
+   Record that forced closure can lose unread buffered bytes and a direct-host or
+   inheriting-descendant tail.
+3. In a launcher integration fixture, verify the production host's fd 2 is a
+   pipe and is not inherited by the terminal channel, while host stdout remains
+   inherited. Treat this only as automated routing/capture evidence, not visual
+   correctness of the default TUI in a real PTY.
+4. Run a host that delivers no fd-2 bytes. Verify no raw file is created for that
+   `startupID`.
+5. Cover normal and non-zero exit, supported SIGINT/SIGTERM handling, startup
+   failure after host spawn, and cleanup failure. Verify no persistence occurs
+   after an answer/turn or while the TUI remains active. Persistence may start
+   only after the entire TUI exits, the whole OpenCode process is confirmed
+   settled, and critical cleanup completes. Force an unconfirmed-settlement case
+   and verify the in-memory bytes are discarded, no raw file is published, and a
+   privacy-safe failure is recorded.
+6. Verify storage uses exclusive creation and direct writes to the final name,
+   not an atomic temporary-file rename. Inject partial write and close failures;
+   verify a partial `.bin` may remain and operator output identifies partial
+   storage with the path, confirmed written-byte count, and a safe warning.
+   Record that `close` is not `fsync` and does not establish power-loss durability.
+7. Verify raw filesystem work starts only after critical cleanup and cannot
+   change the already selected launch, signal, or cleanup result. Also verify the
+   implementation does not claim native-I/O cancellation or universally bounded
+   launcher settlement: pathological or non-local filesystem work may delay it.
+8. Verify the path format is
+   `${XDG_STATE_HOME:-$HOME/.local/state}/opencode-ssh/logs/raw/opencode-host-stderr-YYYY-MM-DD-<startupID>.bin`,
+   the raw directory is `0700`, and each created regular file is `0600`. Exercise
+   retention across UTC dates. Verify it prunes only strict matching regular
+   files older than the current-day-minus-four boundary and preserves the current
+   day plus four previous days, future-dated files (including clock skew),
+   malformed names or dates, symlinks, and directories. Record that stale files
+   can remain, deletion is not secure erasure, and there is no total storage
+   bound.
+9. Search every structured JSONL record from these cases for fixture payloads, ANSI/
+   OSC fragments, NUL encodings, raw-file paths, commands, content, and secrets.
+   Only reviewed bounded counts, status/truncation, and correlation may appear.
+   Confirm the raw file remains the deliberate unredacted exception. Record
+   SIGKILL/power loss as in-memory-loss and possible partial-artifact boundaries,
+   not durability passes.
+10. Exercise a descendant inheriting host fd 2. Verify capture includes only
+    bytes delivered before the launcher closes the pipe and does not claim
+    universal descendant settlement. Record the absence of writer PID/source and
+    write-boundary metadata, and the possible loss of unread pipe-buffer bytes or
+    a direct-host/descendant tail on forced closure.
+11. Keep mechanism assertions separate: ControlMaster bytes must still produce
+    only privacy-safe line classifications, failed package SSH/SFTP must still
+    produce only bounded result classifications, and neither may enter the raw
+    OpenCode-host file.
+
+### Manual Real-PTY Boundary
+
+1. Run the production launcher and default no-argument OpenCode TUI in a real
+   PTY. A mocked host, `debug config`, serve mode, captured stdout harness, or
+   non-interactive test is not this gate.
+2. Use a controlled local plugin and, separately, a controlled MCP server or
+   worker path to emit distinctive non-secret stderr bytes, including benign ANSI
+   and NUL test bytes. Verify no fd-2 output paints over the active TUI and no raw
+   file appears while it is running. Exit the entire TUI, wait for confirmed
+   OpenCode process settlement and critical launcher cleanup, then use
+   `hexdump -C -- <file>` to verify the expected delivered prefix.
+3. Have the same controlled fixture make a benign stdout write. Verify stdout is
+   still inherited by the terminal, is not present in the raw file, and its
+   terminal effect is unchanged. Do not reinterpret that effect as protection
+   from stdout corruption.
+4. From the controlled host/plugin boundary, verify stderr is not a TTY and
+   `process.stderr.isTTY` is falsy (commonly `undefined`) while stdin/stdout
+   retain the normal TUI attachment. Check whether this changes color/progress
+   behavior and ensure no required third-party prompt is silently hidden on
+   stderr.
+5. Exit normally and repeat with the supported interrupt/signal paths. Verify the
+   launcher restores cursor visibility, screen mode, mouse mode, and usable
+   terminal input, and that cleanup/exit status remains correct before inspecting
+   any raw file.
+6. Explicitly record non-coverage: writes to OpenCode stdout or `/dev/tty`, an
+   unrelated process sharing the terminal, and terminal input or mouse-protocol
+   corruption can still affect the TUI. Stderr interception is not a claim that
+   those channels are sanitized or captured.
+7. Leave this gate PENDING unless the production default TUI was actually
+   observed in the real PTY. Automated routing/capture results cannot mark it
+   passed.
 
 ## Remote Test Directory
 

@@ -25,6 +25,7 @@ SAFETY CONSTRAINTS
 18. Each package Bash call starts a separate POSIX sh. Do not rely on shell variables or cd persisting between calls.
 19. If a permission decision is required, wait for the operator. Do not bypass a denied or canceled decision.
 20. Do not expose credentials, environment values, tokens, connection secrets, or contents outside the self-test directory.
+21. Do not request, locate, read, inspect, summarize, or transmit any local raw host-stderr file. It is an unredacted operator-only artifact outside this remote-agent self-test.
 
 STATUS RULES
 
@@ -508,6 +509,8 @@ UNSETTLED:
 NOT_COVERED:
 - visual progressive stdout/stderr updates in the Bash card;
 - visual partial-output retention after failure or timeout;
+- production OpenCode host fd-2 routing and visual behavior in the real default TUI/PTY;
+- raw host-stderr delivery-prefix capture, settlement-gated persistence/discard, partial-file reporting, and retention;
 - permission-dialog attribution;
 - selection and process-wide behavior of external_directory Allow always;
 - manual remote_status denial through the permission UI;

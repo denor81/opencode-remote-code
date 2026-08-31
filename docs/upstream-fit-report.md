@@ -1,6 +1,6 @@
 # OpenCode SSH Fit Report
 
-Status: HARDENING RELEASE INCOMPLETE. The 2026-08-31 runtime-capability, complete-suite, smoke, package, and self-test evidence is green. Formal direct-child release remains incomplete only for real-SSH two-sibling mutation and real permission-UI/direct-child TUI behavior. Real SSH was not run; visual/default no-argument TUI, real permission UI, and model behavior remain unproven by these gates. Earlier `5/5`, real-host, packaging, and live-output TUI results are retained below as historical evidence only.
+Status: HARDENING RELEASE INCOMPLETE. The 2026-08-31 runtime-capability, complete-suite, smoke, package, self-test, and automated raw host-stderr evidence is green. Formal direct-child gaps remain real-SSH two-sibling mutation and real permission-UI/direct-child TUI behavior. Separately, real default-TUI/PTY host-stderr validation is PENDING. Real SSH was not run; visual/default no-argument TUI, real permission UI, and model behavior remain unproven by these gates. Earlier `5/5`, real-host, packaging, and live-output TUI results are retained below as historical evidence only.
 
 ## Environment
 
@@ -24,10 +24,10 @@ Status: HARDENING RELEASE INCOMPLETE. The 2026-08-31 runtime-capability, complet
 ## Evidence Scope
 
 The 2026-08-31 results below are the latest complete default-suite, packaging,
-installed Task, runtime-health, and logging evidence. The exact 1.18.18 Task and
-permission baseline remains the recorded 2026-08-28 result because its explicit
-binary was not rerun in this cycle. Focused boundaries are recorded separately
-from aggregate suite counts and are not interchangeable.
+installed Task, runtime-health, and structured-JSONL evidence. The exact 1.18.18
+Task and permission baseline remains the recorded 2026-08-28 result because its
+explicit binary was not rerun in this cycle. Focused boundaries are recorded
+separately from aggregate suite counts and are not interchangeable.
 The prior direct-subagent SDD and dated fit runs remain useful historical
 observations, but they do not prove the current hardened worktree.
 No real SSH, `npm run test:real`, publish, or manual TUI action ran in these
@@ -37,6 +37,32 @@ transport remained hermetic fake SSH/SFTP.
 Control claims are also separate: package-enforced preflight/Task/file behavior,
 OpenCode host permission policy, and prompt/operator guidance are not
 interchangeable evidence boundaries.
+
+## Current Raw Host-Stderr Evidence
+
+The final current-worktree automated run passed the focused source and launcher
+boundaries, the complete default aggregate, package smoke, package dry-run, and
+the actual target-free self-test. The historical logging and live-Bash
+observations below predate this host-fd-2 mechanism and are not substituted for
+these results. The real visual/default-TUI boundary remains separate and pending.
+
+| Current boundary | Recorded status |
+| --- | --- |
+| Implementation and source-unit evidence | **PASS, 27/27 focused tests.** Exact binary/invalid-UTF-8/ANSI/OSC preservation, first-1-MiB bound, allocation/copy/open/write/close/retention failures, secure modes, conservative pruning, discard, and idempotent settlement passed. Exact-prefix evidence applies only to bytes delivered to the capture `accept` boundary, not all bytes ever written by the host/process tree. |
+| Launcher integration routing and lifecycle | **PASS, 25/25 focused tests.** Host fd 2 was piped rather than inherited by the outer terminal channel; stdout remained inherited; binary, overflow, non-zero, SIGINT/SIGTERM, cleanup, confirmed settlement, unconfirmed discard, descendant-fd settlement, and ControlMaster isolation scenarios passed. Persistence followed confirmed host settlement and completed critical cleanup. This is not visual TUI evidence. |
+| Storage failure and retention evidence | **PASS in focused unit/lifecycle tests.** Direct final-name writes may leave a reported partial `.bin`; `close` is not `fsync`. Retention pruned only strict matching regular files older than the current-day-minus-four boundary while preserving future-dated files, malformed names/dates, symlinks, and directories. Stale files can remain, deletion is not secure erasure, and there is no total storage bound. |
+| Structured JSONL separation | **PASS in focused lifecycle tests.** Fixture payloads and raw paths were absent; only bounded status/count/correlation fields were retained. The always-enabled raw binary remains the deliberate unredacted exception. ControlMaster line classification remained separate from host raw capture; package SSH/SFTP result classification remained unchanged. |
+| Complete default gate | **PASS.** `npm test` passed 35 unit/integration files and 516/516 tests, then package smoke passed 2/2. |
+| Package and target-free self-test | **PASS.** `npm pack --dry-run` listed 174 files; installed OpenCode 1.18.25 passed compatibility and reported Task resume enabled. |
+| Real default no-argument TUI/PTY host-stderr behavior | **PENDING** manual gate. Automated routing/capture tests do not establish visual TUI correctness. The host check must observe stderr as not a TTY and `process.stderr.isTTY` as falsy (commonly `undefined`). |
+
+The raw artifact can contain credentials, tokens, paths, project/provider/model
+content, arbitrary bytes, terminal controls, and invalid UTF-8. Never `cat`,
+casually share, or feed it to a model, remote child, or project context. Forced
+pipe closure can lose unread buffered bytes or a direct-host/descendant tail.
+Native persistence begins after critical cleanup and cannot change the selected
+core result, but pathological or non-local filesystem work can delay launcher
+process settlement; there is no universal return or cancellation bound.
 
 ## Focused 2026-08-31 Resume Capability Evidence
 
@@ -91,7 +117,7 @@ prior version-gated policy and the exact baseline.
 | Installed real-Task fake-SFTP mutation | Pass in the exact sixth scenario; this is real installed OpenCode Task with fake SFTP transport, not real-host SFTP evidence |
 | Installed permission engine | Pass on installed 1.18.25 and exact 1.18.18; exact and descendant external scopes reused after `always`, Bash remained separately prompted, an unrelated scope asked, a second session reused the process-wide approval despite its agent-level deny, and lifecycle logs excluded paths and host permission IDs; SDK responses and fake SSH make this non-visual evidence |
 | Omitted root permission overlay | Installed OpenCode 1.18.25 fresh Task and exact 1.18.18 fresh/resume paths accepted the normal TUI-shaped omitted root overlay as `[]` while retaining explicit child arrays; this API-shaped evidence is not a visual/default-TUI gate |
-| Actual installed loader integration | Pass, 3/3 with zero skips; launches a real OpenCode serve process on a dynamically selected, test-only IPv4-loopback port, observes runtime health through the host-configured SDK transport using that process-owned listener, crosses plugin activation and the 25 ms stable-ready boundary, and verifies production activation/disposal with correlated startup logs; no fixed fixture port is trusted by production, the pre-SSH probe remains no-listener `opencode debug config`, and SSH/SFTP transport is fake |
+| Actual installed loader integration | Pass, 3/3 with zero skips; launches a real OpenCode serve process on a dynamically selected, test-only IPv4-loopback port, observes runtime health through the host-configured SDK transport using that process-owned listener, crosses plugin activation and the 25 ms stable-ready boundary, and verifies production activation/disposal with correlated structured JSONL startup logs; no fixed fixture port is trusted by production, the pre-SSH probe remains no-listener `opencode debug config`, and SSH/SFTP transport is fake |
 | `npm test` | Pass; 33 unit/integration files and 462/462 tests, then 2 smoke files/tests passed 2/2 |
 | `npm run test:smoke` | Pass; 2/2 |
 | `npm pack --dry-run` | Pass; 165 files listed; volatile tarball hashes and sizes are not release claims |
@@ -112,9 +138,10 @@ The exact six-name manifest was:
 The same exact baseline separately required
 `real installed OpenCode permission engine through opencode-ssh reuses external-directory always for exact and descendant scopes only`.
 
-## Verified Runtime-Health And Logging Evidence
+## Verified Runtime-Health And Structured-JSONL Evidence
 
-These focused gates passed in the same final 2026-08-28 cycle:
+These focused runtime-health and structured-JSONL gates passed in the same final
+2026-08-28 cycle; they are not evidence for the newer raw binary capture:
 
 | Gate/boundary | Result |
 | --- | --- |
@@ -123,13 +150,13 @@ These focused gates passed in the same final 2026-08-28 cycle:
 | Focused permission/diagnostics/lifecycle gate | 121/121 passed |
 | Installed loader gate | 3/3 passed with zero skips |
 | Exact target-free no-listener self-test | Valid health decoys held every resolved localhost loopback address at port 4096; OpenCode made zero connections and zero requests; health used the configured in-process SDK path and reported `client._client.get` |
-| Real-serve production lifecycle | Activation, SDK-transport health through the process-owned listener, disposal, and cross-process correlated startup logs passed |
-| Logging contract | One private JSONL file per UTC day, activity-triggered pruning with no background timer, append/no-follow/nonblocking flags, record limit, best-effort deadline behavior, failure suppression, safe fields, startup correlation, one allowlisted root-permission normalization warning at most once per launch, and the bounded external-directory request/reply/repeat/limit lifecycle passed focused and real-engine coverage; maintenance keeps the current UTC day plus four previous days, while stale files may remain without later logging activity |
+| Real-serve production lifecycle | Activation, SDK-transport health through the process-owned listener, disposal, and cross-process correlated structured JSONL startup logs passed |
+| Structured JSONL logging contract | One private JSONL file per UTC day, activity-triggered pruning with no background timer, append/no-follow/nonblocking flags, record limit, best-effort deadline behavior, failure suppression, safe fields, startup correlation, one allowlisted root-permission normalization warning at most once per launch, and the bounded external-directory request/reply/repeat/limit lifecycle passed focused and real-engine coverage; maintenance keeps the current UTC day plus four previous days, while stale files may remain without later logging activity |
 
 The correlated records were limited to documented startup components and
 non-secret `startupID`, then `launchID`/`targetID`. `targetID` is the stable
 pseudonymous SHA-256 of alias plus canonical workdir; it is not secret or claimed
-irreversible against guessed inputs. Production assertions covered stable
+irreversible against guessed inputs. Structured JSONL assertions covered stable
 failure fields without raw errors/messages and excluded raw target alias/
 canonical workdir and project/local paths, commands, configuration, nonce/token/
 credential values and their hashes, session/task/permission IDs, output/bodies,
@@ -308,7 +335,9 @@ different OpenCode release must be revalidated rather than assumed compatible.
 ## Decision
 
 Current audit-hardening decision: **NO-GO for formal direct-child release** until
-the two separately approved real/manual boundaries are observed.
+the two separately approved direct-child real/manual boundaries are observed.
+Raw host-stderr automated readiness is green as recorded above; real default-
+TUI/PTY manual validation remains pending separately.
 
 Final 2026-08-28 automated Task and permission-engine evidence is green on exact
 OpenCode 1.18.18 and ordinary installed OpenCode 1.18.25. The exact six-scenario
@@ -318,13 +347,16 @@ real-host transport/file/lifecycle and OpenCode 1.18.18 live-Bash TUI evidence
 remains recorded, but it does not prove the hardened direct-child permission UI
 or real-SSH sibling mutation path.
 
-Runtime-health/logging evidence is also green as recorded above; it does not
-close the two real/manual release gaps.
+The runtime-health, structured-JSONL, and automated raw binary-capture evidence
+is green as recorded above; it does not close the separate visual/default-TUI or
+two direct-child real/manual release gaps.
 
 Pending boundaries remain explicit:
 
 - real-SSH two-sibling mutation on a disposable target;
-- real permission UI and direct-child TUI behavior.
+- real permission UI and direct-child TUI behavior;
+- real default no-argument TUI/PTY host-stderr routing, capture, and visual
+  behavior.
 
 `npm run test:real` exists and mutates a configured disposable real target. It
 is transport/file/lifecycle evidence only, not Task/OpenCode/TUI evidence, and
