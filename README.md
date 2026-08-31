@@ -475,6 +475,14 @@ at most 64 request lifecycles per launch and emits
 internal evidence-size limit is exceeded. These records contain only
 reply/lifetime, bounded reason enums, and boolean reusable, coverage, pending,
 or repeat state; they do not contain the path or host permission IDs.
+The launcher captures ControlMaster stderr instead of sharing it with the TUI.
+It records at most 64 classified master diagnostics per launch plus one limit
+warning. Failed package SSH/SFTP transports similarly record only the initiating
+operation category (`bootstrap`, a package tool name, or `remote_status`),
+transport, bounded failure kind, exit/termination state, and truncation flags;
+successful operations are not runtime telemetry. Raw OpenSSH lines and internal
+channel numbers are not logged. Correlate master and operation failures by the
+standard IDs and timestamp; concurrent channels cannot be joined one-to-one.
 Records correlate first by non-secret `startupID`, then `launchID` and
 `targetID`. `targetID` is the stable pseudonymous SHA-256 of alias plus canonical
 workdir. It is not secret and is not claimed irreversible against guessed alias/
@@ -488,8 +496,8 @@ Repository code can reuse `createFileLogger` from the relative `./logger.js`-
 style NodeNext path. Use stable event names matching
 `[A-Za-z0-9][A-Za-z0-9._:-]*`, allowlist non-secret fields, and start critical
 cleanup or disposal before awaiting a diagnostic write. This remains
-startup-focused diagnostics plus the two explicitly documented runtime
-compatibility boundaries above, not general project/tool/session telemetry.
+startup-focused diagnostics plus the explicitly documented narrow runtime
+boundaries above, not general successful project/tool/session telemetry.
 
 ## Testing
 

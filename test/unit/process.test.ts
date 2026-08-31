@@ -127,6 +127,52 @@ describe("process helpers", () => {
     })
   })
 
+  it.skipIf(process.platform === "win32")(
+    "settles after child exit when a detached descendant inherits captured stderr",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "process-inherited-stderr-test-"))
+      temporaryDirectories.push(directory)
+      const pidPath = join(directory, "descendant.pid")
+      const descendantScript = [
+        'require("node:fs").writeFileSync(process.argv[1], String(process.pid))',
+        "setTimeout(() => process.exit(0), 2000)",
+      ].join(";")
+      const parentScript = [
+        'const { spawn } = require("node:child_process")',
+        `const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}, process.argv[1]], { detached: true, stdio: ["ignore", "ignore", 2] })`,
+        "child.unref()",
+        'child.once("spawn", () => { process.stderr.write("master diagnostic\\n"); setTimeout(() => process.exit(0), 20) })',
+      ].join(";")
+      const startedAt = Date.now()
+      const child = spawnManaged(
+        process.execPath,
+        ["-e", parentScript, pidPath],
+        {
+          closeCapturedOutputOnExit: true,
+          maxStderrBytes: 0,
+        }
+      )
+
+      const result = await child.wait()
+
+      expect(Date.now() - startedAt).toBeLessThan(1_000)
+      expect(result).toMatchObject({
+        exitCode: 0,
+        stderr: "",
+        stderrTruncated: true,
+      })
+      await expect
+        .poll(() => readFile(pidPath, "utf8").catch(() => ""))
+        .toMatch(/^\d+$/u)
+      const descendantPid = Number(await readFile(pidPath, "utf8"))
+      try {
+        process.kill(descendantPid, "SIGKILL")
+      } catch {
+        // The bounded descendant may already have exited.
+      }
+    }
+  )
+
   it("reports non-zero exit codes through ProcessError", async () => {
     const error = await spawnChecked(process.execPath, ["-e", "process.exit(7)"]).catch(
       (value: unknown) => value

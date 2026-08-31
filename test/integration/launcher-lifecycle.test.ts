@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 import { runCli } from "../../src/cli.js"
 import { REMOTE_ENV } from "../../src/config.js"
+import { resolveDailyLogFilePath } from "../../src/logger.js"
 import { computeTargetID } from "../../src/runtime-paths.js"
 import {
   TASK_RESUME_PROTOCOL,
@@ -32,6 +33,11 @@ interface OpenCodeInvocation {
   readyNonceHash?: string
 }
 
+interface LauncherLogRecord {
+  event: string
+  fields?: Record<string, unknown>
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
@@ -44,6 +50,8 @@ describe("launcher lifecycle", () => {
       FAKE_OPENCODE_IGNORE_SIGTERM: "1",
       FAKE_SFTP_DELAY_MS: "60000",
       FAKE_SSH_COMMAND_DELAY_MS: "60000",
+      FAKE_SSH_MASTER_STDERR: "ambient private diagnostic",
+      FAKE_SSH_MASTER_STDERR_DELAY_MS: "60000",
       FAKE_SSH_NEVER_READY: "1",
       FAKE_SSH_RESPONSES: "not-json",
     }
@@ -361,6 +369,60 @@ describe("launcher lifecycle", () => {
     ).rejects.toThrow(
       /SSH ControlMaster exited while OpenCode was running \(exit code 42\)/
     )
+  }, 10_000)
+
+  it("logs safe active ControlMaster diagnostics without retaining raw stderr", async () => {
+    const alias = "private-diagnostic-host"
+    const canonicalWorkdir = "/srv/private-diagnostic-workdir"
+    const privateDetail = "private.example /secret/path"
+    const diagnosticLines = Array.from(
+      { length: 66 },
+      (_, index) =>
+        `channel ${index + 1}: open failed: connect failed: ${privateDetail}-${index}\n`
+    ).join("")
+    const fixture = await createFixture(canonicalWorkdir, {
+      FAKE_OPENCODE_WRITE_READY: "1",
+      FAKE_OPENCODE_DELAY_MS: "1000",
+      FAKE_OPENCODE_EXIT_CODE: "0",
+      FAKE_SSH_MASTER_STDERR: diagnosticLines,
+      FAKE_SSH_MASTER_STDERR_DELAY_MS: "600",
+    })
+
+    await expect(runCli([alias, "/srv/requested"], fixture.env)).resolves.toBe(0)
+
+    const logPath = resolveDailyLogFilePath({
+      logDirectory: path.join(fixture.stateHome, "opencode-ssh", "logs"),
+    })
+    const rawLog = await readFile(logPath, "utf8")
+    const records = parseJsonLines<LauncherLogRecord>(rawLog)
+    const diagnostics = records.filter(
+      (record) => record.event === "ssh.master.channel_open.failed"
+    )
+    expect(diagnostics).toHaveLength(64)
+    expect(
+      diagnostics.every((diagnostic) =>
+        Object.entries({
+          component: "launcher",
+          targetID: computeTargetID(alias, canonicalWorkdir),
+          reason: "connect-failed",
+          phase: "active",
+        }).every(([key, value]) => diagnostic.fields?.[key] === value)
+      )
+    ).toBe(true)
+    expect(
+      records.filter((record) => record.event === "ssh.master.diagnostics_limited")
+    ).toEqual([
+      expect.objectContaining({
+        fields: expect.objectContaining({
+          reason: "event-limit",
+          phase: "active",
+        }),
+      }),
+    ])
+    expect(rawLog).not.toContain(privateDetail)
+    expect(rawLog).not.toContain("channel 1")
+    expect(rawLog).not.toContain(alias)
+    expect(rawLog).not.toContain(canonicalWorkdir)
   }, 10_000)
 
   it("does not activate when readiness and master death are nearly simultaneous", async () => {

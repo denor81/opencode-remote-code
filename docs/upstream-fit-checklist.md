@@ -146,6 +146,16 @@ For a reviewed local test profile:
    standard envelope. Run the focused plugin-registration integration for the
    same-scope repeat-after-`always` and bounded diagnostics-limit warnings. No
    path, pattern, metadata, or host permission ID may appear.
+10. Make the fake ControlMaster emit split and repeated `channel N: open failed`
+    stderr while OpenCode is active. Verify no raw line reaches inherited TUI
+    stderr, the first 64 messages become bounded `ssh.master.*` records, and one
+    limit warning follows. Confirm no channel number, detail, alias, or path is
+    retained.
+11. Fail one direct SSH-backed package operation and one SFTP-backed operation.
+    Verify `plugin.ssh.transport.failed` records the correct concurrent
+    top-level operation and transport without commands, paths, output, or raw
+    errors. Treat the correlated timestamps and launch IDs as candidate matching,
+    not proof that an internal OpenSSH channel number belongs to one operation.
 
 ## Remote Test Directory
 

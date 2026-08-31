@@ -5,6 +5,10 @@ import {
   type ManagedProcess,
   type ProcessResult,
 } from "../process.js"
+import {
+  createControlMasterDiagnosticParser,
+  type ControlMasterDiagnostic,
+} from "./diagnostics.js"
 
 export interface OpenSshBinaries {
   ssh: string
@@ -24,6 +28,7 @@ export interface ControlMasterOptions {
   checkTimeoutMs?: number
   closeTimeoutMs?: number
   killGraceMs?: number
+  onDiagnostic?: (diagnostic: ControlMasterDiagnostic) => boolean | void
 }
 
 interface ResolvedControlMasterOptions {
@@ -34,6 +39,7 @@ interface ResolvedControlMasterOptions {
   checkTimeoutMs: number
   closeTimeoutMs: number
   killGraceMs: number
+  onDiagnostic: ((diagnostic: ControlMasterDiagnostic) => boolean | void) | undefined
 }
 
 interface MasterCompletion {
@@ -48,7 +54,7 @@ type CheckCompletion =
 
 type PollCompletion = MasterCompletion | { kind: "delay" } | { kind: "abort" }
 
-const DEFAULT_OPTIONS: Omit<ResolvedControlMasterOptions, "env"> = {
+const DEFAULT_OPTIONS: Omit<ResolvedControlMasterOptions, "env" | "onDiagnostic"> = {
   sshBinary: SYSTEM_OPENSSH_BINARIES.ssh,
   startupTimeoutMs: 30_000,
   pollIntervalMs: 100,
@@ -115,16 +121,28 @@ export class ControlMaster {
 
     let process: ManagedProcess
     try {
+      const diagnosticParser = resolved.onDiagnostic
+        ? createControlMasterDiagnosticParser(resolved.onDiagnostic)
+        : undefined
       process = spawnManaged(resolved.sshBinary, masterArgs(alias, socketPath), {
         env: resolved.env,
         signal,
         killGraceMs: resolved.killGraceMs,
+        maxStderrBytes: 0,
+        onStderr: diagnosticParser?.write,
+        closeCapturedOutputOnExit: true,
         stdio: {
           stdin: "inherit",
           stdout: "ignore",
-          stderr: "inherit",
+          stderr: "capture",
         },
       })
+      if (diagnosticParser) {
+        void process.result.then(
+          () => diagnosticParser.end(),
+          () => diagnosticParser.end()
+        )
+      }
     } catch (cause) {
       if (signal.aborted) throw abortedError(alias, socketPath, signal.reason)
       throw new ControlMasterError(
@@ -374,6 +392,7 @@ function resolveOptions(options: ControlMasterOptions): ResolvedControlMasterOpt
     checkTimeoutMs: options.checkTimeoutMs ?? DEFAULT_OPTIONS.checkTimeoutMs,
     closeTimeoutMs: options.closeTimeoutMs ?? DEFAULT_OPTIONS.closeTimeoutMs,
     killGraceMs: options.killGraceMs ?? DEFAULT_OPTIONS.killGraceMs,
+    onDiagnostic: options.onDiagnostic,
   }
 }
 

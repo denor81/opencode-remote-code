@@ -27,9 +27,11 @@ if (args.includes("-MN")) {
   const statePath = fakeStatePath(socketFromOption)
   let readyTimer
   let exitMarkerTimer
+  let diagnosticTimer
   const cleanup = (exitCode = 0) => {
     if (readyTimer) clearTimeout(readyTimer)
     if (exitMarkerTimer) clearInterval(exitMarkerTimer)
+    if (diagnosticTimer) clearTimeout(diagnosticTimer)
     removeOwnState(statePath)
     process.exit(exitCode)
   }
@@ -38,6 +40,15 @@ if (args.includes("-MN")) {
 
   const configuredExit = numberFromEnv("FAKE_SSH_MASTER_EXIT_CODE")
   const exitMarker = process.env.FAKE_SSH_MASTER_EXIT_MARKER
+  const masterStderr = process.env.FAKE_SSH_MASTER_STDERR
+  if (masterStderr) {
+    const delay = numberFromEnv("FAKE_SSH_MASTER_STDERR_DELAY_MS") ?? 0
+    if (delay > 0) {
+      diagnosticTimer = setTimeout(() => process.stderr.write(masterStderr), delay)
+    } else {
+      process.stderr.write(masterStderr)
+    }
+  }
   if (configuredExit !== undefined && !exitMarker) {
     setTimeout(() => cleanup(configuredExit), numberFromEnv("FAKE_SSH_MASTER_EXIT_DELAY_MS") ?? 0)
   } else if (process.env.FAKE_SSH_NEVER_READY !== "1") {

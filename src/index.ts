@@ -27,7 +27,12 @@ import {
   createTaskHooks,
   guardProjectTool,
 } from "./session-safety.js"
-import { createSSHPool } from "./ssh-pool.js"
+import {
+  createSSHPool,
+  type ContextualSSHPool,
+  type SSHPoolOperation,
+  type SSHPoolTransportFailure,
+} from "./ssh-pool.js"
 import {
   applySubagentPolicy,
   type SubagentPolicy,
@@ -46,6 +51,7 @@ import { createWriteTool } from "./tools/write.js"
 const launchOwners = new Map<string, symbol>()
 const rootPermissionNormalizationLoggedLaunches = new Set<string>()
 const permissionDiagnosticBudgets = new Map<string, PermissionDiagnosticBudget>()
+const SSH_TRANSPORT_DIAGNOSTIC_LIMIT = 64
 
 const RemoteCodePlugin: Plugin = async (_input, options) => {
   const probe = activateCompatibilityProbe(_input, options)
@@ -117,7 +123,9 @@ const RemoteCodePlugin: Plugin = async (_input, options) => {
     const manifest = new ManifestManager(pathMapper)
     stage = "pool"
     void logProduction(diagnostics, "info", "plugin.pool.started")
-    const activePool = await createSSHPool(config)
+    const activePool = await createSSHPool(config, {
+      onTransportFailure: createSSHTransportFailureReporter(diagnostics),
+    })
     sshPool = activePool
     void logProduction(diagnostics, "info", "plugin.pool.completed")
     const pathResolver = new RemotePathResolver(config.remoteWorkdir, activePool)
@@ -152,15 +160,19 @@ const RemoteCodePlugin: Plugin = async (_input, options) => {
 
     stage = "bootstrap"
     void logProduction(diagnostics, "info", "plugin.bootstrap.started")
-    const platformResult = await activePool.exec("uname -s", { timeout: 5_000 })
+    const platformResult = await activePool.runWithOperation("bootstrap", () =>
+      activePool.exec("uname -s", { timeout: 5_000 })
+    )
     if (platformResult.exitCode !== 0) {
       throw new Error(`Remote uname failed: ${platformResult.stderr || platformResult.stdout}`)
     }
     const remotePlatform = platformResult.stdout.trim().toLowerCase() || "unknown"
 
-    const gitResult = await activePool.exec(
-      `git -C ${quoteShell(config.remoteWorkdir)} rev-parse --is-inside-work-tree 2>/dev/null`,
-      { timeout: 5_000 }
+    const gitResult = await activePool.runWithOperation("bootstrap", () =>
+      activePool.exec(
+        `git -C ${quoteShell(config.remoteWorkdir)} rev-parse --is-inside-work-tree 2>/dev/null`,
+        { timeout: 5_000 }
+      )
     )
     const isGitRepo = gitResult.exitCode === 0 && gitResult.stdout.trim() === "true"
 
@@ -256,10 +268,19 @@ const RemoteCodePlugin: Plugin = async (_input, options) => {
       return subagentPolicy
     }
 
-    const guardTool = (definition: ToolDefinition): ToolDefinition =>
-      guardLifecycleTool(definition, () => requireActive("tool execution"))
+    const guardTool = (
+      operation: SSHPoolOperation,
+      definition: ToolDefinition
+    ): ToolDefinition =>
+      guardLifecycleTool(
+        definition,
+        () => requireActive("tool execution"),
+        activePool,
+        operation
+      )
     const tools = {
       bash: guardTool(
+        "bash",
         createBashTool(
           activePool,
           config.remoteWorkdir,
@@ -268,42 +289,49 @@ const RemoteCodePlugin: Plugin = async (_input, options) => {
         )
       ),
       glob: guardTool(
+        "glob",
         guardProjectTool(
           createGlobTool(config, activePool, pathResolver),
           sessionSafety
         )
       ),
       grep: guardTool(
+        "grep",
         guardProjectTool(
           createGrepTool(config, activePool, pathResolver),
           sessionSafety
         )
       ),
       read: guardTool(
+        "read",
         guardProjectTool(
           createReadTool(pathMapper, syncEngine, activePool, pathResolver),
           sessionSafety
         )
       ),
       write: guardTool(
+        "write",
         guardProjectTool(
           createWriteTool(pathMapper, syncEngine, pathResolver),
           sessionSafety
         )
       ),
       edit: guardTool(
+        "edit",
         guardProjectTool(
           createEditTool(pathMapper, syncEngine, pathResolver),
           sessionSafety
         )
       ),
       apply_patch: guardTool(
+        "apply_patch",
         guardProjectTool(
           createPatchTool(config, pathMapper, syncEngine, pathResolver),
           sessionSafety
         )
       ),
       remote_status: guardTool(
+        "remote_status",
         createStatusTool(
           config,
           activePool,
@@ -1106,15 +1134,52 @@ function requireCallableSessionLookup(input: unknown): void {
 
 function guardLifecycleTool(
   definition: ToolDefinition,
-  requireActive: () => void
+  requireActive: () => void,
+  pool: ContextualSSHPool,
+  operation: SSHPoolOperation
 ): ToolDefinition {
   const execute = definition.execute
   return {
     ...definition,
     async execute(this: unknown, args, context) {
       requireActive()
-      return await execute.call(this, args, context)
+      return await pool.runWithOperation(operation, () =>
+        execute.call(this, args, context)
+      )
     },
+  }
+}
+
+function createSSHTransportFailureReporter(
+  diagnostics: ProductionDiagnostics | undefined
+): ((failure: SSHPoolTransportFailure) => void) | undefined {
+  if (!diagnostics) return undefined
+
+  let count = 0
+  let limited = false
+  return (failure) => {
+    if (count >= SSH_TRANSPORT_DIAGNOSTIC_LIMIT) {
+      if (limited) return
+      limited = true
+      void logProduction(
+        diagnostics,
+        "warn",
+        "plugin.ssh.transport.diagnostics_limited",
+        { reason: "event-limit" }
+      )
+      return
+    }
+
+    count++
+    void logProduction(diagnostics, "warn", "plugin.ssh.transport.failed", {
+      operation: failure.operation,
+      transport: failure.transport,
+      failureKind: failure.failureKind,
+      exitCode: failure.exitCode,
+      termination: failure.termination,
+      stdoutTruncated: failure.stdoutTruncated,
+      stderrTruncated: failure.stderrTruncated,
+    })
   }
 }
 

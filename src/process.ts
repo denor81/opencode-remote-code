@@ -30,6 +30,8 @@ export interface ProcessOptions {
   maxStderrBytes?: number
   onStdout?: (chunk: Buffer) => void
   onStderr?: (chunk: Buffer) => void
+  /** Close captured pipes after child exit so inherited descendant fds cannot delay settlement. */
+  closeCapturedOutputOnExit?: boolean
 }
 
 export interface ProcessResult {
@@ -251,6 +253,15 @@ export function spawnManaged(
       )
     )
   })
+
+  if (options.closeCapturedOutputOnExit) {
+    child.once("exit", () => {
+      setImmediate(() => {
+        child.stdout?.destroy()
+        child.stderr?.destroy()
+      })
+    })
+  }
 
   child.once("close", (exitCode: number | null, signal: NodeJS.Signals | null) => {
     if (settled) return

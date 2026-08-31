@@ -714,6 +714,86 @@ describe("server plugin registration", () => {
     }
   })
 
+  it("logs a safe top-level operation for failed SSH transport", async () => {
+    const fixture = await createPluginFixture()
+    const { logDirectory, startupID } = enablePluginLogging(fixture)
+    const privateDetail = "private.example /secret/path"
+    let hooks: Hooks | undefined
+
+    try {
+      hooks = await RemoteCodePlugin.server(
+        pluginInput(vi.fn()),
+        pluginOptions(fixture)
+      )
+      await hooks.config?.({} as never)
+      const responses = JSON.parse(process.env.FAKE_SSH_RESPONSES!) as Array<{
+        input: string
+        stdout?: string
+        stderr?: string
+        exitCode?: number
+      }>
+      const identityResponse = responses.find(({ input }) =>
+        input.endsWith("hostname; whoami; pwd -P")
+      )
+      if (!identityResponse) throw new Error("Missing identity response fixture")
+      identityResponse.stderr =
+        `mux_client_request_session: session request failed: ${privateDetail}`
+      identityResponse.exitCode = 255
+      process.env.FAKE_SSH_RESPONSES = JSON.stringify(responses)
+
+      for (let index = 0; index < 66; index++) {
+        await expect(
+          hooks.tool!.remote_status.execute(
+            {},
+            toolContext(vi.fn(async () => undefined), `session-${index}`)
+          )
+        ).rejects.toThrow(/SSH transport failed/u)
+      }
+
+      const records = await waitForPluginLogEventCounts(logDirectory, {
+        "plugin.ssh.transport.failed": 64,
+        "plugin.ssh.transport.diagnostics_limited": 1,
+      })
+      const failures = records.filter(
+        (record) => record.event === "plugin.ssh.transport.failed"
+      )
+      expect(failures).toHaveLength(64)
+      expect(
+        failures.every((failure) =>
+          Object.entries({
+            component: "server-plugin",
+            startupID,
+            launchID: fixture.launchID,
+            targetID: fixture.targetID,
+            operation: "remote_status",
+            transport: "ssh",
+            failureKind: "channel-open-refused",
+            exitCode: 255,
+            termination: null,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          }).every(([key, value]) => failure.fields?.[key] === value)
+        )
+      ).toBe(true)
+      expect(
+        records.filter(
+          (record) =>
+            record.event === "plugin.ssh.transport.diagnostics_limited"
+        )
+      ).toEqual([
+        expect.objectContaining({
+          level: "warn",
+          fields: expect.objectContaining({ reason: "event-limit" }),
+        }),
+      ])
+      expect(JSON.stringify(failures)).not.toContain(privateDetail)
+      expect(JSON.stringify(failures)).not.toContain(fixture.alias)
+      expect(JSON.stringify(failures)).not.toContain(fixture.remoteWorkdir)
+    } finally {
+      await hooks?.dispose?.()
+    }
+  }, 15_000)
+
   it("does not enable executable fallback during production initialization", async () => {
     const fixture = await createPluginFixture()
     const executable = path.join(path.dirname(fixture.readyPath), "runtime-version")

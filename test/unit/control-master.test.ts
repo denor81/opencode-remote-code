@@ -65,6 +65,32 @@ describe("ControlMaster", () => {
     expect(master.isClosed).toBe(true)
   })
 
+  it("captures and classifies ControlMaster diagnostics without inheriting stderr", async () => {
+    const diagnostic = "channel 8: open failed: connect failed: private detail\n"
+    const fixture = await createFixture({ FAKE_SSH_MASTER_STDERR: diagnostic })
+    const controller = new AbortController()
+    const observed: unknown[] = []
+    const master = await ControlMaster.start("staging", fixture.socketPath, controller.signal, {
+      ...fixture.options,
+      onDiagnostic: (value) => {
+        observed.push(value)
+      },
+    })
+    activeMasters.push(master)
+
+    await master.close()
+
+    await expect(master.wait()).resolves.toMatchObject({
+      stderr: "",
+      stderrTruncated: true,
+    })
+    expect(observed).toEqual([
+      { kind: "channel-open-failed", reason: "connect-failed" },
+    ])
+    expect(JSON.stringify(observed)).not.toContain("private detail")
+    expect(JSON.stringify(observed)).not.toContain("channel 8")
+  })
+
   it("times out and terminates a master that never becomes ready", async () => {
     const fixture = await createFixture({ FAKE_SSH_NEVER_READY: "1" })
     const controller = new AbortController()

@@ -11,9 +11,13 @@ const fakeSsh = fileURLToPath(new URL("../fixtures/bin/ssh", import.meta.url))
 const temporaryDirectories: string[] = []
 const controlledEnvironment = [
   "FAKE_SSH_COMMAND_DELAY_MS",
+  "FAKE_SSH_EXIT_CODE",
   "FAKE_SSH_LOG",
+  "FAKE_SSH_STDERR",
   "FAKE_SFTP_DELAY_MS",
+  "FAKE_SFTP_EXIT_CODE",
   "FAKE_SFTP_LOG",
+  "FAKE_SFTP_STDERR",
 ]
 let savedEnvironment = new Map<string, string | undefined>()
 
@@ -120,7 +124,78 @@ describe("SSHPool lifecycle", () => {
       expectedSftpArgs(config),
     ])
   })
+
+  it("attributes concurrent transport failures without exposing operation data", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "ssh-pool-diagnostics-test-"))
+    temporaryDirectories.push(directory)
+    Object.assign(process.env, {
+      FAKE_SSH_EXIT_CODE: "255",
+      FAKE_SSH_STDERR:
+        "mux_client_request_session: session request failed: private ssh detail",
+      FAKE_SFTP_EXIT_CODE: "255",
+      FAKE_SFTP_STDERR:
+        "channel 12: open failed: connect failed: private sftp detail",
+    })
+    const config = poolConfig(directory)
+    const failures: unknown[] = []
+    const pool = await createSSHPool(config, {
+      onTransportFailure: (failure) => failures.push(failure),
+    })
+
+    const results = await Promise.allSettled([
+      pool.runWithOperation("read", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        return await pool.exec("private remote command")
+      }),
+      pool.runWithOperation("edit", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        return await pool.download(
+          "/private/remote",
+          join(directory, "private-local")
+        )
+      }),
+    ])
+
+    expect(results.every((result) => result.status === "rejected")).toBe(true)
+    expect(failures).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operation: "read",
+          transport: "ssh",
+          failureKind: "channel-open-refused",
+          exitCode: 255,
+        }),
+        expect.objectContaining({
+          operation: "edit",
+          transport: "sftp",
+          failureKind: "channel-open-refused",
+          exitCode: 255,
+        }),
+      ])
+    )
+    expect(failures).toHaveLength(2)
+    expect(JSON.stringify(failures)).not.toMatch(/private|channel 12/u)
+
+    await expect(pool.close()).resolves.toBeUndefined()
+  })
 })
+
+function poolConfig(directory: string): RemoteConfig {
+  return {
+    active: true,
+    alias: "private-pool-host",
+    remoteWorkdir: "/private/workdir",
+    controlSocket: join(directory, "private-master.sock"),
+    targetID: "b".repeat(64),
+    launchID: "pool-diagnostics-launch",
+    readyPath: join(directory, "private-ready.json"),
+    readyNonce: "n".repeat(32),
+    runtimeDir: directory,
+    mirrorRoot: join(directory, "private-mirror"),
+    sshBinary: fakeSsh,
+    sftpBinary: fakeSftp,
+  }
+}
 
 function expectedSftpArgs(config: RemoteConfig): string[] {
   return [

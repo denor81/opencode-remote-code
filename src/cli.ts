@@ -38,6 +38,7 @@ import {
 } from "./runtime-paths.js"
 import { SshClient } from "./ssh/client.js"
 import { ControlMaster } from "./ssh/control-master.js"
+import type { ControlMasterDiagnostic } from "./ssh/diagnostics.js"
 import {
   TASK_RESUME_PROTOCOL,
   type TaskResumeCapability,
@@ -58,6 +59,7 @@ const SAFETY_INSTRUCTIONS_PATH = fileURLToPath(
   new URL("../opencode-ssh-remote-use/opencode-ssh-safety.md", import.meta.url)
 )
 const PACKAGE_ROOT_URL = new URL("../", import.meta.url)
+const MASTER_DIAGNOSTIC_LIMIT = 64
 
 interface Ready {
   kind: "ready"
@@ -170,6 +172,44 @@ export async function runCli(
   let diagnosticLaunchID: string | undefined
   let diagnosticTargetID: string | undefined
   let stage: LauncherFailureStage = "compatibility"
+  let masterDiagnosticCount = 0
+  let masterDiagnosticsLimited = false
+  const onMasterDiagnostic = (
+    diagnostic: ControlMasterDiagnostic
+  ): boolean | void => {
+    if (masterDiagnosticCount >= MASTER_DIAGNOSTIC_LIMIT) {
+      if (!masterDiagnosticsLimited) {
+        masterDiagnosticsLimited = true
+        void logLauncher(
+          diagnostics,
+          "warn",
+          "ssh.master.diagnostics_limited",
+          { reason: "event-limit", phase: stage },
+          diagnosticLaunchID,
+          diagnosticTargetID
+        )
+      }
+      return false
+    }
+
+    masterDiagnosticCount++
+    const event =
+      diagnostic.kind === "channel-open-failed"
+        ? "ssh.master.channel_open.failed"
+        : "ssh.master.diagnostic"
+    const fields =
+      diagnostic.kind === "channel-open-failed"
+        ? { reason: diagnostic.reason, phase: stage }
+        : { category: diagnostic.category, phase: stage }
+    void logLauncher(
+      diagnostics,
+      "warn",
+      event,
+      fields,
+      diagnosticLaunchID,
+      diagnosticTargetID
+    )
+  }
 
   let signalExitCode: 130 | 143 | undefined
   const execute = async (): Promise<number> => {
@@ -232,6 +272,7 @@ export async function runCli(
         sshBinary,
         env,
         startupTimeoutMs: 120_000,
+        onDiagnostic: onMasterDiagnostic,
       }
     )
     master = launchMaster

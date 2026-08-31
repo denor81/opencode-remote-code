@@ -332,6 +332,17 @@ is not claimed irreversible against guessed alias/workdir inputs. Production
 failure records use stable categories/codes and allowlisted fields, never raw
 errors or messages.
 
+The launcher continuously drains captured ControlMaster stderr rather than
+letting the master share the OpenCode TUI's terminal stderr. It logs only the
+first 64 classified master messages per launch and one limit warning. Failed
+package SSH/SFTP transports likewise log at most 64 records plus one limit
+warning, containing only a bounded top-level operation category, transport,
+failure kind, exit/termination state, and truncation booleans. Successful
+operations are not logged. Raw OpenSSH lines and internal channel numbers are
+not retained. Correlation uses the standard IDs and timestamps; no deterministic
+one-to-one mapping from an OpenSSH master channel number to a concurrent package
+operation is claimed.
+
 Do not log raw target alias/canonical workdir or project/local paths;
 commands/argv; environment or config content; nonce/token/credential values or
 their hashes; session/task/permission IDs; output or response bodies; or model/
@@ -342,8 +353,8 @@ remain trusted and can read that private local file.
 Future callers must use stable event names matching
 `[A-Za-z0-9][A-Za-z0-9._:-]*` and reviewed non-secret fields. Critical cleanup
 or disposal must start before awaiting diagnostics. Do not expand the narrow
-documented external-directory lifecycle into general project, tool, permission,
-session, model, or provider telemetry.
+documented runtime diagnostics into general successful project, tool,
+permission, session, model, or provider telemetry.
 
 ## Live Command Output
 

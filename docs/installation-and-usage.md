@@ -389,6 +389,24 @@ inputs. The current instrumentation is deliberately narrow:
   limited to reply/lifetime, a bounded reason enum, and boolean reusable/
   coverage/pending/repeat state. Paths, patterns, metadata, and host permission
   IDs are never recorded.
+- the first 64 classified ControlMaster stderr messages per launch, followed by
+  one `ssh.master.diagnostics_limited` warning. Channel-open failures use
+  `ssh.master.channel_open.failed` with only a bounded reason and launcher phase;
+  other lines use `ssh.master.diagnostic` with only a bounded category and
+  phase. The master stderr pipe is continuously drained instead of inherited by
+  the OpenCode TUI;
+- failed package SSH/SFTP transports, up to 64 per plugin launch plus one
+  `plugin.ssh.transport.diagnostics_limited` warning. The
+  `plugin.ssh.transport.failed` record contains only the top-level operation
+  category, `ssh`/`sftp`, a bounded failure kind, exit/termination state, and
+  output-truncation booleans. Successful package operations are not logged.
+
+Raw OpenSSH lines, internal OpenSSH channel numbers, commands, paths, and output
+are not retained in those transport records. The launcher and plugin records can
+be correlated by timestamp and `startupID`/`launchID`/`targetID`. OpenSSH does
+not expose a stable mapping from a master channel number to the requesting slave
+process, so concurrent failures identify the candidate top-level operations but
+do not prove a one-to-one channel-to-operation match.
 
 Production records stable failure categories/codes and allowlisted fields. It
 does not write raw errors/messages, raw target alias/canonical workdir or project/
@@ -418,8 +436,8 @@ field as an explicit allowlist decision; do not pass arbitrary objects or raw
 errors from production startup paths. Start critical cleanup, pool closure, or
 disposal before awaiting a log write so diagnostics cannot delay initiation of
 the security/lifecycle action. Keep this facility startup-focused apart from the
-two narrow runtime compatibility boundaries above rather than expanding it into
-general project, tool, permission, session, model, or provider telemetry.
+documented narrow runtime boundaries above rather than expanding it into general
+successful project, tool, permission, session, model, or provider telemetry.
 
 ## Configure OpenSSH
 
