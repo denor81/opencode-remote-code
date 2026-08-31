@@ -2,13 +2,12 @@ import path from "node:path"
 import { describe, expect, it } from "vitest"
 import { REMOTE_ENV, loadConfig } from "../../src/config.js"
 import { computeTargetID } from "../../src/runtime-paths.js"
-import {
-  TASK_RESUME_PROTOCOL,
-  TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
-} from "../../src/task-resume-capability.js"
+import { TASK_RESUME_PROTOCOL } from "../../src/task-resume-capability.js"
+
+const BASELINE_VERSION = "1.18.18"
 
 describe("launcher Task resume capability", () => {
-  it("enables resume only for exact 1.18.18 version and protocol agreement", () => {
+  it("enables resume for a valid runtime and protocol agreement", () => {
     const env = launcherEnvironment()
     env[REMOTE_ENV.taskResumeCapability] = TASK_RESUME_PROTOCOL
 
@@ -22,7 +21,7 @@ describe("launcher Task resume capability", () => {
     ).toBe(true)
   })
 
-  it("keeps resume disabled when an unqualified expected runtime matches", () => {
+  it("enables resume when another expected runtime matches", () => {
     const env = launcherEnvironment("1.18.19")
     env[REMOTE_ENV.taskResumeCapability] = TASK_RESUME_PROTOCOL
 
@@ -35,7 +34,7 @@ describe("launcher Task resume capability", () => {
       )
     ).toMatchObject({
       expectedOpenCodeRuntimeVersion: "1.18.19",
-      taskResumeEnabled: false,
+      taskResumeEnabled: true,
     })
   })
 
@@ -103,8 +102,7 @@ describe("launcher Task resume capability", () => {
       loadConfig(
         {
           launchID: missing[REMOTE_ENV.launchID],
-          expectedOpenCodeRuntimeVersion:
-            TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+          expectedOpenCodeRuntimeVersion: BASELINE_VERSION,
         },
         missing
       )
@@ -115,8 +113,7 @@ describe("launcher Task resume capability", () => {
     expect(
       loadConfig(
         {
-          expectedOpenCodeRuntimeVersion:
-            TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+          expectedOpenCodeRuntimeVersion: BASELINE_VERSION,
           taskResumeCapability: TASK_RESUME_PROTOCOL,
         },
         {}
@@ -129,8 +126,7 @@ describe("launcher Task resume capability", () => {
       loadConfig(
         {
           launchID: "another-launch",
-          expectedOpenCodeRuntimeVersion:
-            TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+          expectedOpenCodeRuntimeVersion: BASELINE_VERSION,
           taskResumeCapability: TASK_RESUME_PROTOCOL,
         },
         env
@@ -140,8 +136,7 @@ describe("launcher Task resume capability", () => {
 })
 
 function launcherEnvironment(
-  expectedOpenCodeRuntimeVersion: string =
-    TASK_RESUME_QUALIFIED_OPENCODE_VERSION
+  expectedOpenCodeRuntimeVersion: string = BASELINE_VERSION
 ): NodeJS.ProcessEnv {
   const alias = "fixture-host"
   const remoteWorkdir = "/srv/fixture"

@@ -369,21 +369,21 @@ ST-14: TASK RESUME POLICY
 
 Determine from the current generated system context whether package Task resume is enabled.
 
-If Task resume is disabled:
+If Task resume capability is unavailable:
 
 1. Do not send task_id and do not bypass the launch decision.
-2. Verify generated context unambiguously says disabled.
+2. Verify generated context unambiguously says unavailable.
 3. Verify ST-11 established fresh foreground Task availability.
 
 Expected:
 
 - task_id was not sent;
-- resume decision is recorded as disabled;
+- resume decision is recorded as unavailable;
 - fresh foreground direct children worked.
 
 With that evidence, ST-14 PASS.
 
-If ST-11 did not establish fresh foreground Task, still record the disabled decision, but assign ST-14 BLOCKED with prerequisite ST-11.
+If ST-11 did not establish fresh foreground Task, still record the unavailable decision, but assign ST-14 BLOCKED with prerequisite ST-11.
 
 If Task resume is enabled:
 

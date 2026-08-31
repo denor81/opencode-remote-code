@@ -35,7 +35,7 @@ node dist/cli.js self-test
 The actual OpenCode loader, focused Task, and permission-engine integration tests
 must run, not skip. The exact baseline command additionally requires the explicit
 executable,
-version 1.18.18, the unchanged six-name Task manifest including safe same-launch
+version 1.18.18, the exact six-name Task manifest including safe same-launch
 resume, one installed permission-engine scenario, and zero failed/skipped/todo
 scenarios.
 
@@ -43,10 +43,10 @@ The pre-SSH `opencode debug config` probe uses protocol v3 to publish a
 target-free, nonce-bound marker with loader runtime version/source and callable
 `client.session.get`. The selected `--version` must exactly match the runtime,
 and lookup must be callable; missing lookup or malformed/mismatched runtime
-evidence blocks before launch paths, ControlMaster, or SSH. Only explicitly
-release-qualified 1.18.18 enables resume. A different compatible version keeps
-fresh foreground Task but rejects every `task_id` before upstream execution. The
-probe runs actual `debug config` and does not invoke TUI, a model, Task, or SSH.
+evidence blocks before launch paths, ControlMaster, or SSH. Only identified
+matching versions with callable lookup establish resume capability;
+version is recorded evidence, not an allowlist. The probe runs actual `debug
+config` and does not invoke TUI, a model, Task, or SSH.
 
 The normal production launcher starts the no-argument TUI. Its plugin separately
 rechecks callable lookup and matching runtime health through the host SDK's
@@ -77,6 +77,15 @@ arrays; this does not prove visual TUI behavior. `npm test` passed 33 unit/
 integration files and 462/462
 tests, then 2 smoke files/tests passed 2/2; `npm pack --dry-run` passed with 165
 files; and `git diff --check` passed.
+
+Focused 2026-08-31 evidence supersedes the former installed-version resume
+decision: ordinary installed OpenCode 1.18.25 passed all 6/6 Task scenarios with
+real same-launch resume enabled, retained prior child context, renewed preflight,
+and fake-SFTP mutation. The exact 1.18.18 result remains the stable regression
+baseline rather than a production allowlist. The complete `npm test` gate passed
+34 unit/integration files and 480/480 tests, then smoke passed 2/2;
+`npm pack --dry-run` listed 170 files, and the actual 1.18.25 self-test reported
+Task resume enabled.
 
 The focused permission/diagnostics/lifecycle gate passed 121/121, and the complete
 installed-loader gate passed 3/3 with zero skips. The actual target-free
@@ -263,17 +272,17 @@ Record the exact `remote_status`, `bash`, and `edit` prompts and every rejected
 call. Prompt text is not evidence for these package runtime guards; the observed
 absence of preparation/child activity is required.
 
-### Same-Launch Resume Qualification Case
+### Same-Launch Resume Capability Case
 
 Collect both positive and negative evidence. Loader output or generated prompt
 text alone is not a pass, and exact model continuity is not a pass condition.
 
-Positive qualification on a release-qualified launch:
+Positive capability evidence on a compatible launch:
 
-1. Confirm the exact selected OpenCode version is 1.18.18, confirm
-   `opencode-ssh self-test` reports Task resume enabled, and confirm generated
-   system context for the real launch also says enabled. This proves only
-   startup qualification.
+1. Record the exact selected OpenCode version, confirm `opencode-ssh self-test`
+   reports Task resume enabled, and confirm generated system context for the real
+   launch also says enabled. This proves only startup capability; it is not a
+   complete Task/TUI compatibility result.
 2. From one preflighted root, launch a fresh foreground direct child. Require its
    own `remote_status`, let it complete successfully, and preserve the exact
    returned `task_id` together with its `subagent_type`.
@@ -299,15 +308,16 @@ Positive qualification on a release-qualified launch:
    separately. Record any real remote descendant as unsettled until independently
    checked.
 
-Negative qualification and fail-closed evidence:
+Negative capability and fail-closed evidence:
 
 1. With a reviewed fixture missing callable `client.session.get`, or with
    malformed/mismatched selected and loader runtime evidence, verify protocol v3
    blocks startup before ControlMaster or SSH. This is not a resume-disabled
    compatible launch.
-2. With a different loader/runtime-compatible version, verify startup succeeds,
-   generated context says resume disabled, `task_id` is rejected before upstream
-   execution, and a fresh foreground Task remains available.
+2. In a hermetic plugin fixture with a missing, malformed, or mismatched private
+   launcher/plugin resume protocol, verify generated context says capability is
+   unavailable and `task_id` is rejected. A normal compatible launcher must
+   establish the protocol regardless of exact version.
 3. On an enabled launch, verify an unknown or invented ID is rejected before
    upstream creates a fresh child. Verify an ID from a prior launch and an ID
    owned by another root are also rejected.
@@ -531,7 +541,7 @@ Record evidence in `docs/upstream-fit-report.md`. Never include credentials,
 private key data, provider tokens, production content, real aliases, hostnames,
 usernames, IP addresses, workdirs, target IDs, or exact OS/kernel fingerprints.
 Record the exact OpenCode version and distinguish the loader, automated Task,
-installed permission engine, same-launch resume positive/negative qualification,
+installed permission engine, same-launch resume positive/negative capability,
 real-SSH sibling, and manual TUI results; a pass at one boundary is not evidence
 for another. Keep the fresh exact six-scenario Task plus one permission baseline
 and installed real-Task fake-SFTP mutation recorded as completed 2026-08-28 fake-

@@ -1,6 +1,6 @@
 # OpenCode SSH Fit Report
 
-Status: HARDENING RELEASE INCOMPLETE. The final verified 2026-08-28 automated evidence is green. Formal direct-child release remains incomplete only for real-SSH two-sibling mutation and real permission-UI/direct-child TUI behavior. Real SSH was not run; visual/default no-argument TUI, real permission UI, and model behavior remain unproven by these gates. Earlier `5/5`, real-host, packaging, and live-output TUI results are retained below as historical evidence only.
+Status: HARDENING RELEASE INCOMPLETE. The 2026-08-31 runtime-capability, complete-suite, smoke, package, and self-test evidence is green. Formal direct-child release remains incomplete only for real-SSH two-sibling mutation and real permission-UI/direct-child TUI behavior. Real SSH was not run; visual/default no-argument TUI, real permission UI, and model behavior remain unproven by these gates. Earlier `5/5`, real-host, packaging, and live-output TUI results are retained below as historical evidence only.
 
 ## Environment
 
@@ -9,7 +9,7 @@ Status: HARDENING RELEASE INCOMPLETE. The final verified 2026-08-28 automated ev
 | OpenCode manual TUI baseline | 1.18.18 |
 | OpenCode automated loader observation | The normal installed-loader harness passed with a real serve process on a dynamically selected, test-only IPv4-loopback port; runtime health used the host-configured SDK transport through that process-owned listener, no fixed fixture port is a production trust input, and the separate pre-SSH probe remains no-listener `opencode debug config` |
 | OpenCode automated direct-child Task baseline | Exact explicit 1.18.18 passed the exact six-name manifest, 6/6 with zero failed/skipped; resume scenario enabled |
-| OpenCode automated direct-child Task observation | Ordinary installed 1.18.25 passed 6/6; resume disabled and fresh fallback passed |
+| OpenCode automated direct-child Task observation | Ordinary installed 1.18.25 passed 6/6 on 2026-08-31 with real same-launch resume enabled, retained child context, renewed preflight, and fake-SFTP mutation |
 | OpenCode automated permission-engine observation | Installed 1.18.25 and exact 1.18.18 passed exact/descendant process-local external approval, separate Bash permission, unrelated-scope ask, instance-wide second-session reuse despite agent-level deny, and privacy-safe lifecycle logging |
 | opencode-ssh | 0.1.0 |
 | Local OS | Linux x86_64 |
@@ -23,9 +23,11 @@ Status: HARDENING RELEASE INCOMPLETE. The final verified 2026-08-28 automated ev
 
 ## Evidence Scope
 
-The 2026-08-28 results below are the latest complete default-suite, packaging,
-exact Task/permission, runtime-health, and logging evidence. Focused boundaries
-are recorded separately from aggregate suite counts and are not interchangeable.
+The 2026-08-31 results below are the latest complete default-suite, packaging,
+installed Task, runtime-health, and logging evidence. The exact 1.18.18 Task and
+permission baseline remains the recorded 2026-08-28 result because its explicit
+binary was not rerun in this cycle. Focused boundaries are recorded separately
+from aggregate suite counts and are not interchangeable.
 The prior direct-subagent SDD and dated fit runs remain useful historical
 observations, but they do not prove the current hardened worktree.
 No real SSH, `npm run test:real`, publish, or manual TUI action ran in these
@@ -35,6 +37,46 @@ transport remained hermetic fake SSH/SFTP.
 Control claims are also separate: package-enforced preflight/Task/file behavior,
 OpenCode host permission policy, and prompt/operator guidance are not
 interchangeable evidence boundaries.
+
+## Focused 2026-08-31 Resume Capability Evidence
+
+The exact-version production gate was removed. Any identified OpenCode version
+with matching selected, loader, and production runtime evidence plus callable
+`client.session.get` now receives the private Task resume capability. Version
+remains diagnostic and baseline evidence, not an allowlist.
+
+The focused installed Task gate ran against OpenCode 1.18.25 and passed all 6/6
+scenarios. Its resume scenario used the model-visible ID of the actual completed
+direct child, reused that same child and prior context, rejected project mutation
+until renewed `remote_status`, then completed the fake-SFTP mutation. A matching
+1.18.19 plugin fixture also established capability and recorded an unknown-ID
+failure as `plugin.task_resume.failed` with only runtime version,
+`stage=admission`, and `reason=not-registered`; private root/task IDs were absent.
+
+The 1.18.18 exact command remains a stable non-skipping regression baseline. It
+does not control production resume availability.
+
+| 2026-08-31 command/boundary | Recorded result |
+| --- | --- |
+| `npm run lint` | Pass; strict production and test/helper TypeScript checks |
+| Installed OpenCode Task | 1.18.25 passed 6/6 with same-launch resume enabled |
+| Non-baseline plugin/runtime capability | Matching 1.18.19 established resume capability and safely rejected/logged an unknown ID |
+| `npm test` | Pass; 34 unit/integration files and 480/480 tests, then smoke 2/2 |
+| `npm pack --dry-run` | Pass; 170 files listed |
+| `node dist/cli.js self-test` | Pass on installed 1.18.25; Task resume enabled |
+| Exact explicit 1.18.18 baseline | Not rerun; retained 2026-08-28 result below |
+| `npm run test:real` | Not run |
+
+One earlier complete attempt reached 480/480 before a cold package-install smoke
+timeout; an aggregate retry saw transient installed-loader/permission log timing.
+The affected focused gates passed sequentially, and the final complete
+`npm test` rerun passed both aggregate and smoke stages. A later verification
+rerun saw the unrelated ControlMaster polling fixture become ready after one
+check where its timing assertion expected more than one; its focused 5/5 rerun
+passed without a source change.
+
+The complete 2026-08-28 table below is retained as historical evidence for the
+prior version-gated policy and the exact baseline.
 
 ## Final Verified 2026-08-28 Hardening Evidence
 
@@ -65,7 +107,7 @@ The exact six-name manifest was:
 3. `real installed OpenCode Task through opencode-ssh preserves an inherited session deny for read`
 4. `real installed OpenCode Task through opencode-ssh preserves explicit subagent depth zero without creating a child`
 5. `real installed OpenCode Task through opencode-ssh propagates root session abort to two child SSH slaves without retry`
-6. `real installed OpenCode Task through opencode-ssh resumes one completed direct child only when startup qualification enables it`
+6. `real installed OpenCode Task through opencode-ssh resumes one completed direct child when startup capability is established`
 
 The same exact baseline separately required
 `real installed OpenCode permission engine through opencode-ssh reuses external-directory always for exact and descendant scopes only`.

@@ -460,7 +460,7 @@ describe("direct Task runtime guard", () => {
     expect(onRootPermissionNormalized).toHaveBeenCalledOnce()
   })
 
-  it("reports task_id resume as disabled for an unqualified OpenCode", async () => {
+  it("reports task_id resume as unavailable without launcher capability", async () => {
     const safety = new SessionSafety(REMOTE_WORKDIR)
     completePreflight(safety, "root")
     const guard = createTaskGuard(
@@ -469,7 +469,7 @@ describe("direct Task runtime guard", () => {
     )
 
     await expect(runTaskGuard(guard, "root", { task_id: "" })).rejects.toThrow(
-      /resume.*disabled.*selected OpenCode/i
+      /resume capability.*not established.*launch/i
     )
   })
 
@@ -549,6 +549,34 @@ describe("direct Task runtime guard", () => {
 })
 
 describe("safe same-launch Task resume", () => {
+  it("reports classified resume failures without exposing error details to diagnostics", async () => {
+    const safety = new SessionSafety(REMOTE_WORKDIR)
+    completePreflight(safety, "root")
+    const onTaskResumeFailure = vi.fn(() => {
+      throw new Error("diagnostic unavailable")
+    })
+    const hooks = createTaskHooks(
+      client(sessionLookup({ id: "root", permission: [] })),
+      safety,
+      true,
+      new TaskResumeRegistry(),
+      { onTaskResumeFailure }
+    )
+
+    await expect(
+      runTaskBefore(
+        hooks,
+        "root",
+        resumeArgs({ task_id: "session lookup failed permission changed" }),
+        "resume-failure"
+      )
+    ).rejects.toThrow(/not registered for this launch/i)
+    expect(onTaskResumeFailure).toHaveBeenCalledExactlyOnceWith({
+      stage: "admission",
+      reason: "not-registered",
+    })
+  })
+
   it("registers a completed direct child, revokes its preflight, and releases successful sequential resumes", async () => {
     const safety = new SessionSafety(REMOTE_WORKDIR)
     completePreflight(safety, "root")
@@ -906,11 +934,13 @@ describe("safe same-launch Task resume", () => {
     const secondSafety = new SessionSafety(REMOTE_WORKDIR)
     completePreflight(secondSafety, "root")
     const secondRegistry = new TaskResumeRegistry()
+    const onTaskResumeFailure = vi.fn()
     const secondHooks = createTaskHooks(
       client(mutableSessionLookup(sessions)),
       secondSafety,
       true,
-      secondRegistry
+      secondRegistry,
+      { onTaskResumeFailure }
     )
     await registerFreshTask(secondHooks, "root", "child")
     await runTaskBefore(secondHooks, "root", resumeArgs(), "failed-upstream")
@@ -922,6 +952,10 @@ describe("safe same-launch Task resume", () => {
       "failed-upstream"
     )
     expect(secondRegistry.inspect("child")?.state).toBe("reserved")
+    expect(onTaskResumeFailure).toHaveBeenCalledExactlyOnceWith({
+      stage: "completion",
+      reason: "missing-output",
+    })
   })
 
   it("keeps the child locked after malformed metadata or failed post-resume validation", async () => {
@@ -1335,7 +1369,7 @@ describe("safe same-launch Task resume", () => {
     ).resolves.toBeUndefined()
     await expect(
       runTaskBefore(hooks, "root", resumeArgs(), "disabled-resume")
-    ).rejects.toThrow(/resume.*disabled.*selected OpenCode/i)
+    ).rejects.toThrow(/resume capability.*not established.*launch/i)
     await expect(
       runTaskAfter(
         hooks,

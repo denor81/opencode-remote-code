@@ -27,6 +27,6 @@ export async function buildRemoteSystemContext(ctx: RemoteSystemContext): Promis
           "- Task resume is limited to the exact task_id of a successfully completed foreground direct child created by this root during this launch.",
           "- A resumed child must repeat the one-step package remote_status preflight before project tools.",
         ]
-      : ["- Task resume is disabled for the selected OpenCode version."]),
+      : ["- Task resume is unavailable because launcher capability was not established."]),
   ].join("\n")
 }

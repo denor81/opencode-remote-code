@@ -21,16 +21,14 @@ import {
   type ReadyHandshakeIdentity,
 } from "../../src/ready-handshake.js"
 import { computeTargetID } from "../../src/runtime-paths.js"
-import {
-  TASK_RESUME_PROTOCOL,
-  TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
-} from "../../src/task-resume-capability.js"
+import { TASK_RESUME_PROTOCOL } from "../../src/task-resume-capability.js"
 import { FIXTURE_CONTROL_ENV_NAMES } from "../helpers/fixture-environment.js"
 
 const fakeSftp = fileURLToPath(new URL("../fixtures/bin/sftp", import.meta.url))
 const fakeSsh = fileURLToPath(new URL("../fixtures/bin/ssh", import.meta.url))
 const temporaryRoots: string[] = []
 let fixtureSequence = 0
+const BASELINE_VERSION = "1.18.18"
 const isolatedEnvironmentNames = [
   ...Object.values(REMOTE_ENV),
   ...FIXTURE_CONTROL_ENV_NAMES,
@@ -316,7 +314,7 @@ describe("server plugin registration", () => {
       expect(output.system).toHaveLength(originalSystem.length + 1)
       expect(output.system.at(-1)).toContain(`SSH alias: ${fixture.alias}`)
       expect(output.system.at(-1)).toContain(`Remote workspace: ${fixture.remoteWorkdir}`)
-      expect(output.system.at(-1)).toContain("Task resume is disabled")
+      expect(output.system.at(-1)).toContain("Task resume is unavailable")
       expect(output.system.at(-1)).not.toContain("REMOTE_AGENTS_TASK2_MARKER")
 
       const sshCalls = parseJsonLines<string[]>(await readFile(fixture.sshLog, "utf8"))
@@ -835,10 +833,13 @@ describe("server plugin registration", () => {
     await hooks.dispose?.()
   })
 
-  it("accepts a matching unqualified runtime while keeping Task resume disabled", async () => {
+  it("enables Task resume for another matching runtime and logs safe failures", async () => {
     const fixture = await createPluginFixture("1.18.19")
+    const { logDirectory, startupID } = enablePluginLogging(fixture)
     process.env[REMOTE_ENV.taskResumeCapability] = TASK_RESUME_PROTOCOL
-    const sessionGet = vi.fn(async () => ({ data: { id: "root" } }))
+    const privateRootID = "private-compatible-root"
+    const privateTaskID = "private-unknown-task"
+    const sessionGet = vi.fn(async () => ({ data: { id: privateRootID } }))
     const hooks = await RemoteCodePlugin.server(
       pluginInput(sessionGet, "1.18.19"),
       pluginOptions(fixture, { taskResumeCapability: TASK_RESUME_PROTOCOL })
@@ -850,27 +851,81 @@ describe("server plugin registration", () => {
       await completePluginPreflight(
         hooks.tool!,
         vi.fn(async () => undefined),
-        "root",
+        privateRootID,
         "build"
       )
       const output = { system: [] as string[] }
       await hooks["experimental.chat.system.transform"]?.(
-        { sessionID: "root", model: {} as never },
+        { sessionID: privateRootID, model: {} as never },
         output
       )
-      expect(output.system.at(-1)).toContain("Task resume is disabled")
+      expect(output.system.at(-1)).toContain(
+        "Task resume is limited to the exact task_id"
+      )
+      expect(output.system.at(-1)).not.toContain("Task resume is unavailable")
       await expect(
         hooks["tool.execute.before"]!(
-          { tool: "task", sessionID: "root", callID: "fresh-root" },
+          { tool: "task", sessionID: privateRootID, callID: "fresh-root" },
           { args: { subagent_type: "general" } }
         )
       ).resolves.toBeUndefined()
-      await expect(
-        hooks["tool.execute.before"]!(
-          { tool: "task", sessionID: "root", callID: "resume-root" },
-          { args: { subagent_type: "general", task_id: "child" } }
-        )
-      ).rejects.toThrow(/resume.*disabled.*selected OpenCode/i)
+      for (let index = 0; index < 65; index++) {
+        await expect(
+          hooks["tool.execute.before"]!(
+            {
+              tool: "task",
+              sessionID: privateRootID,
+              callID: `resume-root-${index}`,
+            },
+            {
+              args: {
+                subagent_type: "general",
+                task_id: `${privateTaskID}-${index}`,
+              },
+            }
+          )
+        ).rejects.toThrow(/task_id.*not registered for this launch/i)
+      }
+
+      const records = await waitForPluginLogEventCounts(logDirectory, {
+        "plugin.task_resume.failed": 64,
+        "plugin.task_resume.diagnostics_limited": 1,
+      })
+      const failures = records.filter(
+        (record) => record.event === "plugin.task_resume.failed"
+      )
+      expect(failures).toHaveLength(64)
+      for (const failure of failures) {
+        expect(failure).toEqual({
+          timestamp: expect.any(String),
+          level: "warn",
+          event: "plugin.task_resume.failed",
+          pid: process.pid,
+          fields: {
+            stage: "admission",
+            reason: "not-registered",
+            runtimeVersion: "1.18.19",
+            component: "server-plugin",
+            startupID,
+            launchID: fixture.launchID,
+            targetID: fixture.targetID,
+          },
+        })
+      }
+      const limit = records.filter(
+        (record) => record.event === "plugin.task_resume.diagnostics_limited"
+      )
+      expect(limit).toHaveLength(1)
+      expect(limit[0]?.fields).toEqual({
+        reason: "failure-limit",
+        runtimeVersion: "1.18.19",
+        component: "server-plugin",
+        startupID,
+        launchID: fixture.launchID,
+        targetID: fixture.targetID,
+      })
+      expect(JSON.stringify([...failures, ...limit])).not.toContain(privateRootID)
+      expect(JSON.stringify([...failures, ...limit])).not.toContain(privateTaskID)
     } finally {
       await hooks.dispose?.()
     }
@@ -2166,8 +2221,7 @@ interface PluginFixture {
 }
 
 async function createPluginFixture(
-  expectedOpenCodeRuntimeVersion: string =
-    TASK_RESUME_QUALIFIED_OPENCODE_VERSION
+  expectedOpenCodeRuntimeVersion: string = BASELINE_VERSION
 ): Promise<PluginFixture> {
   const root = await mkdtemp(path.join(os.tmpdir(), "ocssh-plugin-"))
   temporaryRoots.push(root)
@@ -2264,7 +2318,7 @@ function toolContext(
 
 function pluginInput(
   sessionGet: unknown,
-  runtimeVersion: string = TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+  runtimeVersion: string = BASELINE_VERSION,
   overrides: {
     legacyGet?: (request: LegacyHealthRequest) => unknown
     globalHealth?: (request: { signal: AbortSignal }) => unknown

@@ -21,10 +21,7 @@ import {
   spawnProcess,
   type ProcessResult,
 } from "./process.js"
-import {
-  TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
-  isTaskResumeQualified,
-} from "./task-resume-capability.js"
+import { isTaskResumeSupported } from "./task-resume-capability.js"
 
 const PROBE_TIMEOUT_MS = 5_000
 const PROBE_OUTPUT_BYTES = 4_096
@@ -40,7 +37,7 @@ export interface OpenCodeCompatibilityResult {
   loaderRuntimeVersion: string
   loaderRuntimeVersionSource: LoaderProbeObservation["loaderRuntimeVersionSource"]
   callableSessionLookupObservedInLoaderProcess: boolean
-  taskResumeQualified: boolean
+  taskResumeSupported: boolean
 }
 
 export interface OpenCodeCompatibilityDiagnostics {
@@ -135,7 +132,7 @@ export async function runOpenCodeCompatibilityCheck(
       callable: true,
     })
 
-    const taskResumeQualified = isTaskResumeQualified(
+    const taskResumeSupported = isTaskResumeSupported(
       version,
       loaderRuntimeVersion,
       callableSessionLookupObservedInLoaderProcess
@@ -146,11 +143,7 @@ export async function runOpenCodeCompatibilityCheck(
 
     if (version !== options.testedVersion) {
       options.writeWarning?.(
-        `OpenCode ${version} passed the loader check but differs from the tested version ${options.testedVersion}; visual TUI checks remain required.${taskResumeQualified ? "" : " Task resume is disabled."}`
-      )
-    } else if (!taskResumeQualified) {
-      options.writeWarning?.(
-        `OpenCode ${version} passed the loader check but is not the release-qualified Task resume version ${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}; Task resume is disabled.`
+        `OpenCode ${version} passed the loader check but differs from the tested version ${options.testedVersion}; visual TUI checks remain required.`
       )
     }
 
@@ -159,7 +152,7 @@ export async function runOpenCodeCompatibilityCheck(
       loaderRuntimeVersion,
       loaderRuntimeVersionSource,
       callableSessionLookup: callableSessionLookupObservedInLoaderProcess,
-      taskResumeQualified,
+      taskResumeSupported,
       durationMs: Date.now() - startedAt,
     })
     return {
@@ -167,7 +160,7 @@ export async function runOpenCodeCompatibilityCheck(
       loaderRuntimeVersion,
       loaderRuntimeVersionSource,
       callableSessionLookupObservedInLoaderProcess,
-      taskResumeQualified,
+      taskResumeSupported,
     }
   } catch (error) {
     await logCompatibility(

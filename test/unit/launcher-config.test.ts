@@ -6,7 +6,6 @@ import {
 } from "../../src/launcher-config.js"
 import {
   TASK_RESUME_PROTOCOL,
-  TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
 } from "../../src/task-resume-capability.js"
 
 describe("parseCli", () => {
@@ -63,7 +62,7 @@ describe("parseCli", () => {
 
 describe("mergeOpenCodeConfigContent", () => {
   const safetyInstructionsPath = "/opt/opencode/opencode-ssh-safety.md"
-  const expectedRuntimeVersion = TASK_RESUME_QUALIFIED_OPENCODE_VERSION
+  const expectedRuntimeVersion = "1.18.18"
 
   it("creates additive config when existing content is absent", () => {
     const merged = JSON.parse(
@@ -111,7 +110,7 @@ describe("mergeOpenCodeConfigContent", () => {
     })
   })
 
-  it("injects the private Task resume protocol only when qualified", () => {
+  it("injects the private Task resume protocol only when supported", () => {
     const merged = JSON.parse(
       mergeOpenCodeConfigContent(
         undefined,

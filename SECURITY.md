@@ -28,7 +28,7 @@ OpenCode permissions.
 
 | Class | Security meaning |
 | --- | --- |
-| Package-enforced | Private one-step per-session `remote_status` preflight state; project-tool and root-Task gates; root-only foreground Task; runtime rejection of child/background Task; startup-qualified same-launch resume with launch-local ownership and atomic admission; collision check for `mcp.remote`; SSH/SFTP process policy; and package file transaction checks. |
+| Package-enforced | Private one-step per-session `remote_status` preflight state; project-tool and root-Task gates; root-only foreground Task; runtime rejection of child/background Task; startup-capability same-launch resume with launch-local ownership and atomic admission; collision check for `mcp.remote`; SSH/SFTP process policy; and package file transaction checks. |
 | OpenCode host policy | Tool catalogs and configured global, per-agent, and session permission decisions. The package requests permissions but does not implement or sandbox the host permission UI. |
 | Prompt/operator guidance | The injected safety text, disjoint sibling scopes, reviewed administration, final remote verification, and manual release checklist. Prompt compliance is not an enforcement boundary. |
 
@@ -51,11 +51,11 @@ plugin behavior remains inside this trusted boundary.
   loader runtime. Missing lookup or malformed, missing, or mismatched runtime
   evidence blocks startup before launch paths, ControlMaster, or SSH. The probe
   uses generated local configuration and no shell or SSH target.
-- Callable session lookup is required for every launch. Only explicitly
-  release-qualified OpenCode 1.18.18 enables Task resume. Another identified
-  loader/runtime-compatible version may launch with resume disabled, keeps
-  fresh foreground direct Task, and rejects every `task_id` before upstream
-  execution.
+- Callable session lookup is required for every launch. Every identified
+  OpenCode version that passes matching selected/loader/runtime checks receives
+  the private package Task resume capability. Version is diagnostic and baseline
+  evidence, not an allowlist. Missing lookup or mismatched runtime evidence
+  blocks the launch rather than continuing with weakened Task safety.
 - The v3 marker is target-free and pre-SSH. During normal production startup,
   after the launcher starts the ControlMaster and canonicalizes the workdir, the
   plugin rechecks callable session lookup and runtime health through the OpenCode
@@ -114,11 +114,13 @@ evidence, or a child without an explicit valid permission array remains
 fail-closed.
 
 Task resume is a package capability, not a general promise about OpenCode's
-`task_id` behavior. Callable `client.session.get` is a launch requirement, not
-the resume discriminator. Each launch enables resume only for explicitly
-release-qualified OpenCode 1.18.18; generated system context exposes the
-decision. Another compatible version rejects `task_id` before upstream but
-continues to allow fresh foreground direct children.
+`task_id` behavior. Callable `client.session.get`, matching selected/loader/
+production runtime versions, and the private launcher/plugin protocol establish
+the capability for any identified version. Generated system context exposes the
+decision. The launch-local registry and validation below remain the security
+backstop for evidence observed through the expected hooks. OpenCode remains in
+the trusted computing base; startup does not prove that an arbitrary future host
+still invokes every hook with equivalent semantics.
 
 When enabled, fresh admission is one-shot for the root and Task call. The package
 binds the root permission fingerprint, inherited SSH-project deny projection,
@@ -320,7 +322,12 @@ mirror, pool, bootstrap, config, ready, and disposal. Runtime compatibility
 signals include an at-most-once-per-launch
 `plugin.task_root_permission.normalized` warning when an omitted caller-root
 permission overlay is accepted as empty. It contains only the standard
-correlation envelope. The external-directory request/reply lifecycle tracks at
+correlation envelope. Failed Task resume admission, fresh-child registration,
+and completion validation emit at most 64 `plugin.task_resume.failed` records
+per launch plus one limit warning. They contain only the runtime version and
+bounded stage/reason enums, never IDs, arguments, prompts, results, or raw
+errors; successful Task/resume calls are not logged. The external-directory
+request/reply lifecycle tracks at
 most 64 requests per launch and also emits a same-scope repeat-after-`always`
 warning plus one bounded diagnostics-limit warning. Those lifecycle records
 contain only the reply/lifetime, bounded limit reason, and boolean reusable/
@@ -395,7 +402,13 @@ Automated direct-child cancellation coverage proves local OpenCode Task/session
 settlement, local fake-SSH slave termination, and no retry. It does not prove
 universal termination of real remote descendants.
 
-Final 2026-08-28 automated evidence passed the exact OpenCode 1.18.18
+Focused 2026-08-31 evidence passed all 6/6 installed OpenCode 1.18.25 Task
+scenarios with real same-launch resume enabled, including retained child context,
+renewed preflight, and fake-SFTP mutation. The complete gate passed 34
+unit/integration files and 480/480 tests, then smoke passed 2/2; package dry-run
+listed 170 files and the actual self-test reported resume enabled. Final
+2026-08-28 automated evidence
+passed the exact OpenCode 1.18.18
 six-scenario manifest with safe same-launch resume and installed real-Task
 fake-SFTP mutation, plus a real installed permission-engine scenario. Ordinary
 installed OpenCode 1.18.25 also passed 6/6 with resume disabled and fresh
@@ -408,7 +421,9 @@ two-sibling mutation and real permission UI and direct-child TUI behavior;
 `npm run test:real` was not run. Earlier `5/5` records are historical pre-resume
 evidence and are not the current six-scenario result.
 
-The same final cycle's focused runtime-health/logging evidence passed lint/build,
+The 2026-08-28 installed 1.18.25 disabled-resume observation below is historical
+evidence for the former version gate, not the current runtime policy. The same
+final cycle's focused runtime-health/logging evidence passed lint/build,
 actual OpenCode 1.18.25 self-test with Task resume disabled, a focused 121/121
 permission/diagnostics/lifecycle gate, and installed-loader 3/3 with zero skips. The target-free localhost:4096
 decoys saw zero connections/requests and the observer reported

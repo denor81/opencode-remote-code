@@ -7,10 +7,7 @@ import { runCli } from "../../src/cli.js"
 import { REMOTE_ENV } from "../../src/config.js"
 import { resolveDailyLogFilePath } from "../../src/logger.js"
 import { computeTargetID } from "../../src/runtime-paths.js"
-import {
-  TASK_RESUME_PROTOCOL,
-  TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
-} from "../../src/task-resume-capability.js"
+import { TASK_RESUME_PROTOCOL } from "../../src/task-resume-capability.js"
 import { scrubFixtureEnvironment } from "../helpers/fixture-environment.js"
 
 const fakeOpenCode = fileURLToPath(new URL("../fixtures/bin/opencode", import.meta.url))
@@ -22,6 +19,7 @@ const fakeSsh = fileURLToPath(new URL("../fixtures/bin/ssh", import.meta.url))
 const safetyInstructionsPath = fileURLToPath(
   new URL("../../opencode-ssh-remote-use/opencode-ssh-safety.md", import.meta.url)
 )
+const BASELINE_VERSION = "1.18.18"
 const temporaryRoots: string[] = []
 
 interface OpenCodeInvocation {
@@ -132,8 +130,7 @@ describe("launcher lifecycle", () => {
         [REMOTE_ENV.targetID]: expectedTargetID,
         [REMOTE_ENV.sshBinary]: fakeSsh,
         [REMOTE_ENV.sftpBinary]: fakeSftp,
-        [REMOTE_ENV.expectedOpenCodeRuntimeVersion]:
-          TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+        [REMOTE_ENV.expectedOpenCodeRuntimeVersion]: BASELINE_VERSION,
         [REMOTE_ENV.taskResumeCapability]: TASK_RESUME_PROTOCOL,
         OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS: "false",
       })
@@ -162,8 +159,7 @@ describe("launcher lifecycle", () => {
       expect(injected[0]).not.toContain("/src/")
       expect(injected[1]).toEqual({
         launchID: invocation.env[REMOTE_ENV.launchID],
-        expectedOpenCodeRuntimeVersion:
-          TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+        expectedOpenCodeRuntimeVersion: BASELINE_VERSION,
         taskResumeCapability: TASK_RESUME_PROTOCOL,
       })
 
@@ -467,7 +463,7 @@ describe("launcher lifecycle", () => {
 
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain("OpenCode 9.8.7 passed the loader check")
-    expect(warnings[0]).toContain("Task resume is disabled")
+    expect(warnings[0]).not.toContain("Task resume is unavailable")
     expect(progress).toEqual([
       "checking OpenCode compatibility...",
       "testing OpenCode 9.8.7 plugin loader...",
@@ -477,16 +473,18 @@ describe("launcher lifecycle", () => {
     const [invocation] = parseJsonLines<OpenCodeInvocation>(
       await readFile(fixture.openCodeLog, "utf8")
     )
-    expect(invocation.env[REMOTE_ENV.taskResumeCapability]).toBeUndefined()
+    expect(invocation.env[REMOTE_ENV.taskResumeCapability]).toBe(
+      TASK_RESUME_PROTOCOL
+    )
     expect(
       invocation.env[REMOTE_ENV.expectedOpenCodeRuntimeVersion]
     ).toBe("9.8.7")
     const config = JSON.parse(invocation.configContent ?? "") as {
       plugin: Array<[string, Record<string, unknown>]>
     }
-    expect(config.plugin.at(-1)?.[1]).not.toHaveProperty("taskResumeCapability")
     expect(config.plugin.at(-1)?.[1]).toMatchObject({
       expectedOpenCodeRuntimeVersion: "9.8.7",
+      taskResumeCapability: TASK_RESUME_PROTOCOL,
     })
   }, 10_000)
 
@@ -507,7 +505,7 @@ describe("launcher lifecycle", () => {
     expect(await pathExists(fixture.openCodeLog)).toBe(false)
   })
 
-  it("reports disabled resume for an unqualified self-test binary", async () => {
+  it("reports enabled resume for another compatible self-test binary", async () => {
     const fixture = await createFixture("/srv/unused", {
       FAKE_OPENCODE_VERSION_STDOUT: "1.18.19\n",
       npm_config_opencode_ssh_probe_runtime_version: "1.18.19",
@@ -521,7 +519,7 @@ describe("launcher lifecycle", () => {
     ).resolves.toBe(0)
 
     expect(progress.at(-1)).toBe(
-      "self-test passed (OpenCode 1.18.19; Task resume disabled)"
+      "self-test passed (OpenCode 1.18.19; Task resume enabled)"
     )
     expect(await pathExists(fixture.sshLog)).toBe(false)
   })

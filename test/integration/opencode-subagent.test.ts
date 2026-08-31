@@ -5,7 +5,6 @@ import type {
   Session,
   ToolPart,
 } from "@opencode-ai/sdk/v2"
-import { TASK_RESUME_QUALIFIED_OPENCODE_VERSION } from "../../src/task-resume-capability.js"
 import {
   LOCAL_EXECUTION_CANARY,
   REMOTE_AGENTS_MARKER,
@@ -71,7 +70,7 @@ const RESUME_FALLBACK_MARKER = "TASK_RESUME_FRESH_FALLBACK_MARKER"
 const RESUME_FALLBACK_TEXT = "Fresh fallback child verified Task remains available."
 const RESUME_ENABLED_ROOT_TEXT = "Root verified same-session Task resume."
 const RESUME_DISABLED_ROOT_TEXT =
-  "Root observed Task resume is disabled and verified fresh Task remains available."
+  "Root observed Task resume is unavailable and verified fresh Task remains available."
 const RESUME_WRITE_PATH = `${TASK_FIXTURE_WORKDIR}/resume-sftp-proof.txt`
 const RESUME_WRITE_CONTENT = "TASK_RESUME_SFTP_CONTENT\n"
 
@@ -657,7 +656,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
   it.skipIf(skipReason !== undefined)(
     skipReason
       ? `requires an installed OpenCode (${skipReason})`
-      : "resumes one completed direct child only when startup qualification enables it",
+      : "resumes one completed direct child when startup capability is established",
     async () => {
       if (installedOpenCode.kind !== "available") {
         throw new Error("OpenCode availability guard did not skip the test")
@@ -704,19 +703,11 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
       fixture = await startInstalledOpenCodeTaskFixture({
         openCode: installedOpenCode,
         steps: (state) => {
-          let expectedTaskResumeEnabled: boolean
           if (exactExpectedVersion !== undefined) {
-            expect(exactExpectedVersion).toBe(
-              TASK_RESUME_QUALIFIED_OPENCODE_VERSION
-            )
             expect(state.installedVersion).toBe(exactExpectedVersion)
-            expect(state.taskResumeEnabled).toBe(true)
-            expectedTaskResumeEnabled = true
-          } else {
-            expectedTaskResumeEnabled =
-              state.installedVersion === TASK_RESUME_QUALIFIED_OPENCODE_VERSION
-            expect(state.taskResumeEnabled).toBe(expectedTaskResumeEnabled)
           }
+          const expectedTaskResumeEnabled = true
+          expect(state.taskResumeEnabled).toBe(expectedTaskResumeEnabled)
           launchState = { ...state, expectedTaskResumeEnabled }
           return script.steps(expectedTaskResumeEnabled)
         },
@@ -727,15 +718,8 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
       let scenarioError: unknown
 
       try {
-        const expectedTaskResumeEnabled =
-          exactExpectedVersion !== undefined
-            ? true
-            : fixture.installedVersion ===
-              TASK_RESUME_QUALIFIED_OPENCODE_VERSION
+        const expectedTaskResumeEnabled = true
         if (exactExpectedVersion !== undefined) {
-          expect(exactExpectedVersion).toBe(
-            TASK_RESUME_QUALIFIED_OPENCODE_VERSION
-          )
           expect(fixture.installedVersion).toBe(exactExpectedVersion)
           expect(fixture.taskResumeEnabled).toBe(true)
         }
@@ -840,7 +824,7 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
 
         if (expectedTaskResumeEnabled) {
           if (resumeTask.state.status !== "completed") {
-            throw new Error("Expected the qualified Task resume to complete")
+            throw new Error("Expected the enabled Task resume to complete")
           }
           expect(resumeTask.state.metadata).toMatchObject({
             parentSessionId: root.id,
@@ -936,10 +920,10 @@ describe("real installed OpenCode Task through opencode-ssh", () => {
           await assertResumeWriteScenario(fixture)
         } else {
           if (resumeTask.state.status !== "error") {
-            throw new Error("Expected the unqualified Task resume to fail")
+            throw new Error("Expected Task resume without launcher capability to fail")
           }
           expect(resumeTask.state.error).toContain(
-            "Task resume is disabled for the selected OpenCode version"
+            "Task resume capability was not established for this launch"
           )
           expect(script.blockedPreflightError).toBeUndefined()
           expect(initialChildRequests).toHaveLength(2)
@@ -1468,7 +1452,7 @@ function resumeProviderScript(callbacks: {
               !hasParentHeader(request) &&
               providerHasToolCall(request, resumeTaskCallID) &&
               providerToolResultText(request, resumeTaskCallID)?.includes(
-                "Task resume is disabled for the selected OpenCode version"
+                "Task resume capability was not established for this launch"
               ) === true &&
               !providerHasToolCall(request, fallbackTaskCallID),
             response: {
@@ -2163,12 +2147,12 @@ function assertResumeGuidance(
       "A resumed child must repeat the one-step package remote_status preflight"
     )
     expect(system).not.toContain(
-      "Task resume is disabled for the selected OpenCode version"
+      "Task resume is unavailable because launcher capability was not established"
     )
     return
   }
   expect(system).toContain(
-    "Task resume is disabled for the selected OpenCode version"
+    "Task resume is unavailable because launcher capability was not established"
   )
   expect(system).not.toContain(
     "Task resume is limited to the exact task_id of a successfully completed foreground direct child"

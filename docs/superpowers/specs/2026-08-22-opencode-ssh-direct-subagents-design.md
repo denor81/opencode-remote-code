@@ -1,9 +1,9 @@
 # OpenCode SSH Direct Subagents Design
 
 Status: HISTORICAL DESIGN superseded on 2026-08-22. Current source and
-authoritative documentation, including the release-qualified same-launch resume
-contract and fresh 2026-08-27 evidence, supersede every operational and release
-claim below.
+authoritative documentation, including the runtime-capability same-launch resume
+contract that replaced the later exact-version gate, supersede every operational
+and release claim below.
 
 ## Goal
 

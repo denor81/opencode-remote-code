@@ -26,6 +26,7 @@ import {
   SessionSafety,
   createTaskHooks,
   guardProjectTool,
+  type TaskResumeFailure,
 } from "./session-safety.js"
 import {
   createSSHPool,
@@ -51,7 +52,9 @@ import { createWriteTool } from "./tools/write.js"
 const launchOwners = new Map<string, symbol>()
 const rootPermissionNormalizationLoggedLaunches = new Set<string>()
 const permissionDiagnosticBudgets = new Map<string, PermissionDiagnosticBudget>()
+const taskResumeDiagnosticBudgets = new Map<string, TaskResumeDiagnosticBudget>()
 const SSH_TRANSPORT_DIAGNOSTIC_LIMIT = 64
+const TASK_RESUME_DIAGNOSTIC_LIMIT = 64
 
 const RemoteCodePlugin: Plugin = async (_input, options) => {
   const probe = activateCompatibilityProbe(_input, options)
@@ -152,6 +155,13 @@ const RemoteCodePlugin: Plugin = async (_input, options) => {
             diagnostics,
             "warn",
             "plugin.task_root_permission.normalized"
+          )
+        },
+        onTaskResumeFailure(failure) {
+          reportTaskResumeFailure(
+            diagnostics,
+            config.expectedOpenCodeRuntimeVersion,
+            failure
           )
         },
       }
@@ -701,8 +711,43 @@ interface PermissionDiagnosticBudget {
   trackingLimitLogged: boolean
 }
 
+interface TaskResumeDiagnosticBudget {
+  failureCount: number
+  limitLogged: boolean
+}
+
 const MAX_TRACKED_PERMISSION_DIAGNOSTICS = 64
 const MAX_PERMISSION_DIAGNOSTIC_EVIDENCE_BYTES = 8 * 1_024
+
+function reportTaskResumeFailure(
+  diagnostics: ProductionDiagnostics | undefined,
+  runtimeVersion: string,
+  failure: TaskResumeFailure
+): void {
+  if (!diagnostics) return
+  const budget = taskResumeDiagnosticBudgets.get(diagnostics.launchID) ?? {
+    failureCount: 0,
+    limitLogged: false,
+  }
+  taskResumeDiagnosticBudgets.set(diagnostics.launchID, budget)
+  if (budget.failureCount >= TASK_RESUME_DIAGNOSTIC_LIMIT) {
+    if (budget.limitLogged) return
+    budget.limitLogged = true
+    void logProduction(
+      diagnostics,
+      "warn",
+      "plugin.task_resume.diagnostics_limited",
+      { reason: "failure-limit", runtimeVersion }
+    )
+    return
+  }
+  budget.failureCount++
+  void logProduction(diagnostics, "warn", "plugin.task_resume.failed", {
+    stage: failure.stage,
+    reason: failure.reason,
+    runtimeVersion,
+  })
+}
 
 function configFailure(primary: unknown, disposal: DisposalOutcome): unknown {
   if (disposal.ok) return primary

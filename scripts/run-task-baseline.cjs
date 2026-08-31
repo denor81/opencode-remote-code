@@ -16,7 +16,7 @@ const expectedTaskScenarioFullNames = [
   "preserves an inherited session deny for read",
   "preserves explicit subagent depth zero without creating a child",
   "propagates root session abort to two child SSH slaves without retry",
-  "resumes one completed direct child only when startup qualification enables it",
+  "resumes one completed direct child when startup capability is established",
 ].map((title) => `${suiteName} ${title}`)
 const expectedPermissionScenarioFullName =
   "real installed OpenCode permission engine through opencode-ssh reuses external-directory always for exact and descendant scopes only"

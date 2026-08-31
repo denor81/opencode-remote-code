@@ -8,9 +8,12 @@ Tested against OpenCode 1.18.18. Before every SSH connection, the launcher asks
 the installed OpenCode to load this server plugin in an isolated local check and
 requires its reported version to match nonce-bound loader runtime evidence.
 Callable session lookup is mandatory for every launch. Safe same-launch Task
-resume is package-controlled and enabled only for explicitly release-qualified
-OpenCode 1.18.18; another loader/runtime-compatible version keeps fresh
-foreground direct Task but rejects `task_id` before upstream execution.
+resume is package-controlled and enabled for every identified OpenCode version
+that passes the selected/loader/runtime version checks and exposes callable
+session lookup. The package's ownership and admission guards fail closed if a
+later runtime exposes missing, malformed, or mismatched Task/session evidence
+through the expected hooks. OpenCode itself remains part of the trusted
+computing base; startup does not behaviorally attest Task.
 
 Final 2026-08-28 evidence includes the exact 1.18.18 six-scenario resume gate,
 the installed permission-engine scenario, and installed real-Task fake-SFTP
@@ -99,11 +102,10 @@ source, and callable `client.session.get`. The selected version must exactly
 match the loader runtime version. Missing lookup or malformed, missing, or
 mismatched runtime evidence blocks launch before launch paths, ControlMaster, or
 SSH. A different identified version may continue only when all those loader
-checks pass; it prints a warning, keeps fresh foreground direct Task, and has
-resume disabled. Only explicitly release-qualified 1.18.18 enables resume.
-Generated system context states the launch decision. This check does not observe
-TUI rendering, so run the documented manual TUI checks before relying on a new
-version. See the
+checks pass; it prints a baseline-difference warning and receives the same
+package-controlled Task resume capability. Generated system context states the
+launch decision. This check does not observe TUI rendering or execute Task, so
+run the documented manual TUI checks before relying on a new version. See the
 [automatic compatibility preflight](docs/installation-and-usage.md#automatic-compatibility-preflight)
 for the exact checks, regression coverage, and intentional limitations.
 
@@ -189,7 +191,7 @@ All operations still run with the SSH user's Unix permissions. Use explicit
 
 | Class | What it covers |
 | --- | --- |
-| Package-enforced | One-step per-session `remote_status` preflight with embedded remote identity validation, project-tool and root-Task gates, root-only foreground Task, child/background rejection, depth 0/1 policy, startup-qualified same-launch resume with an ownership registry and atomic admission, `mcp.remote` collision rejection, SSH/SFTP no-retry behavior, and file transaction checks. |
+| Package-enforced | One-step per-session `remote_status` preflight with embedded remote identity validation, project-tool and root-Task gates, root-only foreground Task, child/background rejection, depth 0/1 policy, startup-capability same-launch resume with an ownership registry and atomic admission, `mcp.remote` collision rejection, SSH/SFTP no-retry behavior, and file transaction checks. |
 | OpenCode host policy | Tool visibility and evaluation of configured global, per-agent, and session permission rules. This package does not replace OpenCode's permission engine. |
 | Prompt/operator guidance | The injected safety document, disjoint child scopes, reviewed `sudo`, final remote verification, and manual fit procedures. Guidance is not a sandbox control. |
 
@@ -213,11 +215,11 @@ and child-session state remain local. Model/provider requests follow the
 configured provider and may leave the machine.
 
 Task resume is package-controlled rather than general OpenCode behavior.
-Callable session lookup is required for every launch. Only explicitly
-release-qualified OpenCode 1.18.18 enables resume; another compatible loader and
-runtime version still permits fresh foreground direct Task but rejects every
-`task_id` before upstream execution. Generated system context reports the
-decision.
+Callable session lookup and matching selected, loader, and production runtime
+versions are required for every launch. Every identified version that passes
+those checks receives the private launcher/plugin resume capability. This is a
+runtime capability decision rather than a semver allowlist; a different version
+still prints the baseline-difference warning.
 
 OpenCode keeps global/per-agent policy separate from its optional session-local
 permission overlay. The package treats an omitted caller-root
@@ -226,7 +228,7 @@ permission merge. This grants nothing by itself. Explicit malformed root
 permissions, incompatible root-session `ask` rules, changed root evidence, and
 children without an explicit valid permission array still fail closed.
 
-When startup qualification enables resume, all of these rules apply:
+When startup capability enables resume, all of these rules apply:
 
 - The root may use only the exact `task_id` returned for a successfully
   completed foreground direct child created by that same root in the current
@@ -391,8 +393,8 @@ output does not authorize an automatic retry; inspect remote state first.
 The launcher:
 
 1. Requires the pre-SSH protocol-v3 loader marker, exact selected/loader runtime
-   version agreement, and callable session lookup, then decides whether the
-   exact 1.18.18 launch qualifies resume.
+   version agreement, and callable session lookup, then establishes the private
+   Task resume capability for that identified version.
 2. Starts a private OpenSSH ControlMaster and resolves the canonical remote
    workdir only after that target-free check passes.
 3. Creates the stable local OpenCode workspace and launches OpenCode with the
@@ -475,6 +477,11 @@ at most 64 request lifecycles per launch and emits
 internal evidence-size limit is exceeded. These records contain only
 reply/lifetime, bounded reason enums, and boolean reusable, coverage, pending,
 or repeat state; they do not contain the path or host permission IDs.
+Failed resume admission, fresh-child registration, and completion validation
+emit at most 64 `plugin.task_resume.failed` warnings per launch plus one
+`plugin.task_resume.diagnostics_limited` warning. They contain only the runtime
+version and bounded `stage`/`reason` enums, never session/task IDs, arguments,
+prompts, results, or raw errors. Successful Task and resume calls are not logged.
 The launcher captures ControlMaster stderr instead of sharing it with the TUI.
 It records at most 64 classified master diagnostics per launch plus one limit
 warning. Failed package SSH/SFTP transports similarly record only the initiating
@@ -516,11 +523,19 @@ npm pack --dry-run
 node dist/cli.js self-test
 ```
 
-`test:task-baseline` requires the explicit executable and accepts only exact
-OpenCode 1.18.18 with the unchanged six-name Task manifest, including safe
-same-launch resume, plus one installed permission-engine scenario passing with
-zero failed, skipped, or todo scenarios. Final evidence recorded on 2026-08-28
-is:
+`test:task-baseline` remains an exact regression baseline: it requires an
+explicit OpenCode 1.18.18 executable and the exact six-name Task manifest,
+including safe same-launch resume, plus one installed permission-engine scenario
+passing with zero failed, skipped, or todo scenarios. It does not gate resume in
+production by version.
+
+Focused 2026-08-31 evidence on installed OpenCode 1.18.25 passed all 6/6 Task
+scenarios with real same-launch resume enabled. The resumed run reused the exact
+child ID and prior context, required renewed preflight, and completed the
+fake-SFTP mutation. The complete `npm test` gate passed 34 unit/integration files
+and 480/480 tests, then smoke passed 2/2. `npm pack --dry-run` listed 170 files,
+and the actual 1.18.25 self-test reported Task resume enabled. Historical final
+evidence recorded on 2026-08-28 is:
 
 - `npm run lint` passed, and `npm run build` passed repeatedly.
 - The actual installed OpenCode 1.18.25 self-test passed; Task resume was

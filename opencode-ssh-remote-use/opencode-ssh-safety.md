@@ -19,7 +19,7 @@ authorization mechanism:
 
 - **Package-enforced:** private per-session preflight, package project-tool and
   root-Task gates, root-only foreground Task, child/background rejection,
-  startup-qualified same-launch resume with launch-local ownership and atomic
+  startup-capability same-launch resume with launch-local ownership and atomic
   admission, SSH/SFTP behavior, and package file transaction checks.
 - **OpenCode host policy:** tool catalogs and configured global, per-agent, and
   session permission decisions.
@@ -323,14 +323,14 @@ if a trusted later config hook exposes it. `background: true` remains unsupporte
 and the launcher forces background subagents off.
 
 Task resume is package-controlled, not general OpenCode behavior. Callable
-session lookup is required for every launch, and only explicitly
-release-qualified OpenCode 1.18.18 enables resume. Another compatible
-loader/runtime version keeps fresh foreground Task but rejects every `task_id`
-before upstream execution. Read the generated OpenCode SSH system context before
-considering resume:
+session lookup and matching selected, loader, and production runtime versions
+are required for every launch. Every identified version passing those checks
+receives the private package resume capability; version is diagnostic and
+baseline evidence, not an allowlist. Read the generated OpenCode SSH system
+context before considering resume:
 
-- If the context says Task resume is disabled, never submit `task_id`. Start a
-  fresh foreground Task and provide all required context.
+- If the context says Task resume capability is unavailable, never submit
+  `task_id`. Start a fresh foreground Task and provide all required context.
 - If the context says Task resume is enabled, resume only the exact `task_id` of
   a successfully completed foreground direct child created by this same root in
   this current `opencode-ssh` launch, and use exactly the same `subagent_type`.

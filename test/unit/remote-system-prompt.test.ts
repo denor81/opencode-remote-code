@@ -30,7 +30,7 @@ describe("remote system context", () => {
         "- The remote workspace is the default directory, not a privilege boundary. Paths outside it require permission.",
         "- Each bash call is a separate remote shell. A cd command does not persist into later calls.",
         "- Use sudo -n only for explicit administrative shell commands; file tools do not elevate through sudo.",
-        "- Task resume is disabled for the selected OpenCode version.",
+        "- Task resume is unavailable because launcher capability was not established.",
       ].join("\n")
     )
     expect(context).not.toContain(REMOTE_AGENTS_MARKER)
@@ -49,7 +49,7 @@ describe("remote system context", () => {
     expect(context).toContain(
       "A resumed child must repeat the one-step package remote_status preflight before project tools."
     )
-    expect(context).not.toContain("Task resume is disabled")
+    expect(context).not.toContain("Task resume is unavailable")
   })
 })
 

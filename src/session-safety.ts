@@ -333,7 +333,30 @@ export interface TaskHooks {
 
 export interface TaskHooksOptions {
   onRootPermissionNormalized?: () => void
+  onTaskResumeFailure?: (failure: TaskResumeFailure) => void
 }
+
+export interface TaskResumeFailure {
+  stage: "admission" | "registration" | "completion"
+  reason: TaskResumeFailureReason
+}
+
+export type TaskResumeFailureReason =
+  | "invalid-arguments"
+  | "missing-output"
+  | "session-lookup"
+  | "session-shape"
+  | "result-shape"
+  | "not-registered"
+  | "ownership"
+  | "topology"
+  | "subagent-type"
+  | "reservation"
+  | "permissions"
+  | "security-epoch"
+  | "preflight"
+  | "internal-state"
+  | "unknown"
 
 export function createTaskHooks(
   client: PluginInput["client"],
@@ -363,7 +386,7 @@ export function createTaskHooks(
       }
     )
 
-  const before: TaskHooks["before"] = async (input, output) => {
+  const executeBefore: TaskHooks["before"] = async (input, output) => {
     if (input.tool !== "task") return
 
     const ownerSecurityEpoch = securityEpochs.current(input.sessionID)
@@ -401,7 +424,7 @@ export function createTaskHooks(
     }
     if (!taskResumeEnabled) {
       throw new Error(
-        "OpenCode SSH Task resume is disabled for the selected OpenCode version"
+        "OpenCode SSH Task resume capability was not established for this launch"
       )
     }
 
@@ -449,7 +472,7 @@ export function createTaskHooks(
     safety.clearSession(taskID)
   }
 
-  const after: TaskHooks["after"] = async (input, output) => {
+  const executeAfter: TaskHooks["after"] = async (input, output) => {
     if (input.tool !== "task" || !taskResumeEnabled) return
 
     const reservation = registry!.findReservation(input.sessionID, input.callID)
@@ -573,6 +596,56 @@ export function createTaskHooks(
     throw new Error(
       "OpenCode SSH fresh Task completion had no active admission; replay is denied"
     )
+  }
+
+  const reportTaskResumeFailure = (
+    stage: TaskResumeFailure["stage"],
+    error: unknown
+  ): void => {
+    notifyTaskResumeFailure({
+      stage,
+      reason: classifyTaskResumeFailure(error),
+    })
+  }
+
+  const notifyTaskResumeFailure = (failure: TaskResumeFailure): void => {
+    try {
+      options.onTaskResumeFailure?.(failure)
+    } catch {
+      // Diagnostics must not affect Task admission or completion.
+    }
+  }
+
+  const before: TaskHooks["before"] = async (input, output) => {
+    const resumeAttempt =
+      taskResumeEnabled &&
+      input.tool === "task" &&
+      hasTaskID(output.args)
+    try {
+      await executeBefore(input, output)
+    } catch (error) {
+      if (resumeAttempt) reportTaskResumeFailure("admission", error)
+      throw error
+    }
+  }
+
+  const after: TaskHooks["after"] = async (input, output) => {
+    if (input.tool !== "task" || !taskResumeEnabled) {
+      await executeAfter(input, output)
+      return
+    }
+    const stage: TaskResumeFailure["stage"] = hasTaskID(input.args)
+      ? "completion"
+      : "registration"
+    try {
+      await executeAfter(input, output)
+      if (output === undefined || output === null) {
+        notifyTaskResumeFailure({ stage, reason: "missing-output" })
+      }
+    } catch (error) {
+      reportTaskResumeFailure(stage, error)
+      throw error
+    }
   }
 
   return {
@@ -998,6 +1071,73 @@ function requireTaskArgument(
     throw new Error(`OpenCode SSH Task resume requires a non-empty ${field}`)
   }
   return value
+}
+
+function hasTaskID(args: unknown): boolean {
+  return isRecord(args) && Object.hasOwn(args, "task_id")
+}
+
+function classifyTaskResumeFailure(error: unknown): TaskResumeFailureReason {
+  let message: string
+  try {
+    message = error instanceof Error ? error.message : ""
+  } catch {
+    return "unknown"
+  }
+  if (
+    message.startsWith("OpenCode SSH Task resume denied because task_id ") &&
+    message.endsWith(" is not registered for this launch")
+  ) {
+    return "not-registered"
+  }
+  if (
+    message.startsWith("OpenCode SSH Task resume denied because task_id ") &&
+    message.endsWith(" is not registered to the caller root")
+  ) {
+    return "ownership"
+  }
+  if (
+    message.startsWith("OpenCode SSH Task denied because ") &&
+    message.includes(" session lookup failed for ")
+  ) {
+    return "session-lookup"
+  }
+  if (
+    /invalid session lookup response|did not expose an explicit permission array/iu.test(
+      message
+    )
+  ) {
+    return "session-shape"
+  }
+  if (
+    /result was malformed|result metadata|completion arguments|fresh Task completion arguments/iu.test(
+      message
+    )
+  ) {
+    return "result-shape"
+  }
+  if (/not directly owned/iu.test(message)) {
+    return "ownership"
+  }
+  if (/subagent[_ -]type|observed target agent|observed Task agent/iu.test(message)) {
+    return "subagent-type"
+  }
+  if (
+    /already reserved|uncertain|stale|generation|active reservation|call ID/iu.test(
+      message
+    )
+  ) {
+    return "reservation"
+  }
+  if (/permission|inherited root deny/iu.test(message)) return "permissions"
+  if (/security evidence changed/iu.test(message)) return "security-epoch"
+  if (/preflight/iu.test(message)) return "preflight"
+  if (/arguments were invalid|requires a non-empty task_id/iu.test(message)) {
+    return "invalid-arguments"
+  }
+  if (/root session|direct child|parentID/iu.test(message)) return "topology"
+  if (/registry is disposed|internal Task/iu.test(message)) return "internal-state"
+  return "unknown"
 }
 
 function wildcardMatch(input: string, pattern: string): boolean {

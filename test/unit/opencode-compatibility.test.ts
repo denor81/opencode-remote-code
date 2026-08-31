@@ -2,25 +2,25 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { runOpenCodeCompatibilityCheck } from "../../src/opencode-compatibility.js"
 import { readPackageMetadata } from "../../src/package-metadata.js"
-import { TASK_RESUME_QUALIFIED_OPENCODE_VERSION } from "../../src/task-resume-capability.js"
 
 const fakeOpenCode = fileURLToPath(new URL("../fixtures/bin/opencode", import.meta.url))
 const pluginURL = new URL("../../", import.meta.url)
+const BASELINE_VERSION = "1.18.18"
 
 describe("OpenCode compatibility preflight", () => {
-  it("qualifies OpenCode 1.18.18 when loader lookup is callable", async () => {
+  it("supports Task resume when loader lookup is callable", async () => {
     const progress: string[] = []
 
     const result = await runOpenCodeCompatibilityCheck({
       binary: fakeOpenCode,
       env: {
         ...process.env,
-        FAKE_OPENCODE_VERSION_STDOUT: `${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}\n`,
+        FAKE_OPENCODE_VERSION_STDOUT: `${BASELINE_VERSION}\n`,
         npm_config_opencode_ssh_probe_runtime_version:
-          TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+          BASELINE_VERSION,
       },
       signal: new AbortController().signal,
-      testedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+      testedVersion: BASELINE_VERSION,
       pluginURL,
       writeProgress: (message) => progress.push(message),
       writeWarning: () => undefined,
@@ -29,19 +29,19 @@ describe("OpenCode compatibility preflight", () => {
     expect(progress).toHaveLength(3)
     expect(progress[0]).toBe("checking OpenCode compatibility...")
     expect(progress[1]).toBe(
-      `testing OpenCode ${TASK_RESUME_QUALIFIED_OPENCODE_VERSION} plugin loader...`
+      `testing OpenCode ${BASELINE_VERSION} plugin loader...`
     )
     expect(progress[2]).toMatch(/^compatibility passed \([\d.]+s\)$/u)
     expect(result).toEqual({
-      detectedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
-      loaderRuntimeVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+      detectedVersion: BASELINE_VERSION,
+      loaderRuntimeVersion: BASELINE_VERSION,
       loaderRuntimeVersionSource: "runtime-executable",
       callableSessionLookupObservedInLoaderProcess: true,
-      taskResumeQualified: true,
+      taskResumeSupported: true,
     })
   })
 
-  it("does not qualify another loader-tested version with callable lookup", async () => {
+  it("supports another loader-tested version with callable lookup", async () => {
     const loaderTestedVersion = "1.18.19"
     const warnings: string[] = []
 
@@ -59,15 +59,13 @@ describe("OpenCode compatibility preflight", () => {
       writeWarning: (message) => warnings.push(message),
     })
 
-    expect(warnings).toEqual([
-      `OpenCode ${loaderTestedVersion} passed the loader check but is not the release-qualified Task resume version ${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}; Task resume is disabled.`,
-    ])
+    expect(warnings).toEqual([])
     expect(result).toEqual({
       detectedVersion: loaderTestedVersion,
       loaderRuntimeVersion: loaderTestedVersion,
       loaderRuntimeVersionSource: "runtime-executable",
       callableSessionLookupObservedInLoaderProcess: true,
-      taskResumeQualified: false,
+      taskResumeSupported: true,
     })
   })
 
@@ -98,13 +96,13 @@ describe("OpenCode compatibility preflight", () => {
         binary: fakeOpenCode,
         env: {
           ...process.env,
-          FAKE_OPENCODE_VERSION_STDOUT: `${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}\n`,
+          FAKE_OPENCODE_VERSION_STDOUT: `${BASELINE_VERSION}\n`,
           npm_config_opencode_ssh_probe_runtime_version:
-            TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+            BASELINE_VERSION,
           npm_config_opencode_ssh_probe_without_session_get: "1",
         },
         signal: new AbortController().signal,
-        testedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+        testedVersion: BASELINE_VERSION,
         pluginURL,
         writeProgress: (message) => progress.push(message),
         writeWarning: (message) => warnings.push(message),
@@ -114,7 +112,7 @@ describe("OpenCode compatibility preflight", () => {
     )
     expect(progress).toEqual([
       "checking OpenCode compatibility...",
-      `testing OpenCode ${TASK_RESUME_QUALIFIED_OPENCODE_VERSION} plugin loader...`,
+      `testing OpenCode ${BASELINE_VERSION} plugin loader...`,
     ])
     expect(warnings).toEqual([])
   })
@@ -134,11 +132,11 @@ describe("OpenCode compatibility preflight", () => {
         binary: fakeOpenCode,
         env: {
           ...process.env,
-          FAKE_OPENCODE_VERSION_STDOUT: `${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}\n`,
+          FAKE_OPENCODE_VERSION_STDOUT: `${BASELINE_VERSION}\n`,
           ...probeEnv,
         },
         signal: new AbortController().signal,
-        testedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+        testedVersion: BASELINE_VERSION,
         pluginURL,
       })
     ).rejects.toThrow(/plugin loader returned an invalid result/u)
@@ -169,22 +167,22 @@ describe("OpenCode compatibility preflight", () => {
         binary: fakeOpenCode,
         env: {
           ...process.env,
-          FAKE_OPENCODE_VERSION_STDOUT: `${TASK_RESUME_QUALIFIED_OPENCODE_VERSION}\n`,
+          FAKE_OPENCODE_VERSION_STDOUT: `${BASELINE_VERSION}\n`,
           npm_config_opencode_ssh_probe_runtime_version:
-            TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+            BASELINE_VERSION,
           https_proxy: proxy,
           npm_config_opencode_ssh_expected_https_proxy: proxy,
         },
         signal: new AbortController().signal,
-        testedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+        testedVersion: BASELINE_VERSION,
         pluginURL,
       })
     ).resolves.toEqual({
-      detectedVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
-      loaderRuntimeVersion: TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
+      detectedVersion: BASELINE_VERSION,
+      loaderRuntimeVersion: BASELINE_VERSION,
       loaderRuntimeVersionSource: "runtime-executable",
       callableSessionLookupObservedInLoaderProcess: true,
-      taskResumeQualified: true,
+      taskResumeSupported: true,
     })
   })
 

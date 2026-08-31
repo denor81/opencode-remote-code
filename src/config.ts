@@ -1,10 +1,7 @@
 import path from "node:path"
 import { isOpenCodeVersion } from "./opencode-runtime-version.js"
 import { computeTargetID } from "./runtime-paths.js"
-import {
-  TASK_RESUME_PROTOCOL,
-  TASK_RESUME_QUALIFIED_OPENCODE_VERSION,
-} from "./task-resume-capability.js"
+import { TASK_RESUME_PROTOCOL } from "./task-resume-capability.js"
 
 export const REMOTE_ENV = {
   alias: "OPENCODE_SSH_ALIAS",
@@ -100,8 +97,6 @@ export function loadConfig(
     )
   }
   const taskResumeEnabled =
-    expectedOpenCodeRuntimeVersion ===
-      TASK_RESUME_QUALIFIED_OPENCODE_VERSION &&
     options?.taskResumeCapability === TASK_RESUME_PROTOCOL &&
     env[REMOTE_ENV.taskResumeCapability] === TASK_RESUME_PROTOCOL
 

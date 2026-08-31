@@ -8,11 +8,10 @@ does not need Node.js, OpenCode, this package, or another agent runtime.
 OpenCode SSH is tested against OpenCode 1.18.18. Other OpenCode versions are
 allowed only after the installed OpenCode loads this package's server plugin in
 an isolated preflight. A different version still requires the manual TUI checks
-in this guide and runs with Task resume disabled. Callable session lookup is
-required for every launch; same-launch resume is package-controlled and enabled
-only for explicitly release-qualified OpenCode 1.18.18. Another compatible
-loader/runtime version keeps fresh foreground direct Task but rejects every
-`task_id` before upstream execution.
+in this guide. Callable session lookup and matching selected, loader, and
+production runtime versions are required for every launch; every identified
+version passing those checks receives package-controlled same-launch resume.
+Version is diagnostic and baseline evidence, not a runtime allowlist.
 
 Final 2026-08-28 evidence passed the exact six-scenario 1.18.18 Task portion and
 one permission-engine scenario, making the complete exact baseline 7/7, plus
@@ -166,12 +165,13 @@ a target through `opencode-ssh self-test`.
    runtime version, and callable session lookup must be present. Missing lookup
    or malformed/mismatched runtime evidence blocks startup; it is not a
    loader-compatible launch with resume merely disabled.
-7. Loader compatibility and resume qualification are separate only after those
-   mandatory checks pass. Task resume is enabled exclusively when the selected
-   and loader runtime versions also equal the explicitly release-qualified
-   version, currently 1.18.18. Another identified compatible version continues
-   with fresh foreground direct Task available, every `task_id` rejected before
-   upstream execution, and generated context saying resume is disabled.
+7. After those mandatory checks pass, the launcher supplies the private Task
+   resume protocol to the matching production plugin tuple. There is no semver
+   allowlist: any identified matching version receives the capability. The
+   package's launch-local ownership, permission, security-epoch, and completion
+   checks remain fail-closed when the expected hooks expose missing, malformed,
+   or mismatched evidence. OpenCode remains trusted; this startup step does not
+   behaviorally attest Task on every future release.
 8. Only after the marker passes does a real launch create launch paths and start
    the SSH ControlMaster. If the executable exits, crashes, hangs, or returns an
    invalid result first, the command fails closed before any SSH startup.
@@ -271,14 +271,15 @@ SFTP mutation. These startup checks therefore do not certify:
 - session persistence or every future OpenCode runtime behavior.
 
 An identified version different from the tested 1.18.18 baseline may continue
-only after the probe passes and always produces a warning, but Task resume stays
-disabled. Passing means the loader boundary is compatible; it is not a claim of
-universal compatibility.
+only after the probe passes and always produces a warning. It receives Task
+resume capability, but passing the startup probe is not a claim that every
+future Task/TUI behavior was exercised; runtime resume guards reject malformed
+or mismatched evidence and emit privacy-safe classified diagnostics.
 
 ### Related Gates
 
 - `opencode-ssh self-test` runs exactly the same target-free startup probe and
-  reports whether that selected executable qualifies Task resume.
+  reports whether that selected executable establishes Task resume capability.
 - A normal launch subsequently requires a separate nonce-protected ready
   handshake after the post-ControlMaster SDK-transport runtime/session lookup
   recheck, bootstrap `uname`/Git SSH, tool construction, hook registration, and
@@ -300,7 +301,7 @@ universal compatibility.
 - The exact non-skipping release-baseline gate is
   `OPENCODE_TASK_TEST_BINARY=/absolute/path/to/opencode-1.18.18 npm run test:task-baseline`.
   Its updated contract requires that explicit executable, exact version 1.18.18,
-  the unchanged six-name Task manifest including safe same-launch resume, one
+  the exact six-name Task manifest including safe same-launch resume, one
   installed permission-engine scenario, and zero failed, skipped, or todo
   scenarios. This release integration gate exercises full Task and permission
   behavior; startup does not replace it with a model call on every launch.
@@ -380,6 +381,12 @@ inputs. The current instrumentation is deliberately narrow:
   when an omitted caller-root permission overlay is accepted as empty. The
   warning contains only the standard startup/launch/target correlation envelope
   and is not per-call or per-session telemetry;
+- up to 64 `plugin.task_resume.failed` records per launch for failed admission,
+  fresh-child registration, or completion validation, followed by one
+  `plugin.task_resume.diagnostics_limited` warning. Fields contain only the
+  observed runtime version and bounded `stage`/`reason` enums. Session/task IDs,
+  arguments, prompts, results, and raw errors are never recorded; successful
+  Task and resume calls are not logged;
 - `plugin.permission.external_directory.requested` and
   `plugin.permission.external_directory.replied` lifecycle records, plus
   `plugin.permission.external_directory.repeated_after_always` when the same
@@ -512,19 +519,20 @@ Package-enforced Task behavior:
 - `background: true` is unsupported. The launcher also forces
   `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=false`.
 - `task_id` is accepted only under the package-controlled same-launch resume
-  contract below. It is not accepted when startup qualification disables resume.
+  contract below. It is not accepted if the private launcher capability is
+  absent or malformed.
 - An enabled `mcp.remote` config is rejected because it can collide with the
   package `remote_status` identity.
 
 ### Safe Same-Launch Resume
 
-Do not infer support from general OpenCode `task_id` behavior. The launch's
-generated system context is authoritative: if it says Task resume is disabled,
-do not submit `task_id`. Start a fresh foreground Task and include the context
-that child needs.
+Do not infer safety from general OpenCode `task_id` behavior. The launch's
+generated system context is authoritative: if it says Task resume capability is
+unavailable, do not submit `task_id`. Start a fresh foreground Task and include
+the context that child needs.
 
 When generated context says resume is enabled, the package applies this exact
-contract:
+contract for every compatible identified runtime:
 
 1. The only eligible ID is the exact `task_id` of a successfully completed
    foreground direct child created by the same root during the current
@@ -905,6 +913,14 @@ against the selected version. The baseline command is stricter: it requires the
 explicit executable,
 exact 1.18.18, the exact six Task scenarios including safe same-launch resume,
 one permission-engine scenario, and zero failed/skipped/todo scenarios.
+
+The exact baseline is a stable regression gate, not a production version
+allowlist. Focused 2026-08-31 evidence on installed OpenCode 1.18.25 passed all
+6/6 Task scenarios with real same-launch resume enabled, retained child context,
+renewed preflight, and fake-SFTP mutation. The complete `npm test` gate passed 34
+unit/integration files and 480/480 tests, then smoke passed 2/2;
+`npm pack --dry-run` listed 170 files, and the actual 1.18.25 self-test reported
+Task resume enabled.
 
 Final verified 2026-08-28 evidence is:
 

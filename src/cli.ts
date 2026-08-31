@@ -233,10 +233,10 @@ export async function runCli(
       writeWarning: compatibilityHooks.writeWarning,
     })
     const taskResumeCapability: TaskResumeCapability | undefined =
-      compatibility.taskResumeQualified ? TASK_RESUME_PROTOCOL : undefined
+      compatibility.taskResumeSupported ? TASK_RESUME_PROTOCOL : undefined
     if (parsed.action === "self-test") {
       compatibilityHooks.writeProgress?.(
-        `self-test passed (OpenCode ${compatibility.detectedVersion}; Task resume ${compatibility.taskResumeQualified ? "enabled" : "disabled"})`
+        `self-test passed (OpenCode ${compatibility.detectedVersion}; Task resume ${compatibility.taskResumeSupported ? "enabled" : "disabled"})`
       )
       return 0
     }
