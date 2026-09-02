@@ -72,6 +72,7 @@ export const FIXTURE_CONTROL_ENV_NAMES = [
   ...FAKE_SSH_ENV_NAMES,
   ...FAKE_SFTP_ENV_NAMES,
   ...FAKE_OPENCODE_ENV_NAMES,
+  "FAKE_REMOTE_ROOT",
   "OPENCODE_PURE",
   "OPENCODE_SSH_OPENCODE_BIN",
   "npm_config_opencode_ssh_expected_https_proxy",

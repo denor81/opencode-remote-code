@@ -6,12 +6,23 @@ import type { RemotePathResolver } from "../remote-path-resolver.js"
 import { remotePermissionPattern } from "../remote-path.js"
 import { quoteShell } from "../shell-quote.js"
 import type { SSHPool } from "../ssh-pool.js"
-import type { SyncEngine } from "../sync-engine.js"
+import {
+  RemoteFileSizeLimitError,
+  type SyncEngine,
+} from "../sync-engine.js"
 
 
 const DEFAULT_LIMIT = 2000
 const MAX_BYTES = 50 * 1024
 const MAX_LINE_LENGTH = 2000
+const MAX_IMAGE_BYTES = 3 * 1024 * 1024
+const IMAGE_PROBE_BYTES = 12
+
+type SupportedImageMime =
+  | "image/gif"
+  | "image/jpeg"
+  | "image/png"
+  | "image/webp"
 
 const BINARY_EXTENSIONS = new Set([
   ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
@@ -26,6 +37,76 @@ const BINARY_EXTENSIONS = new Set([
 function isBinaryByExtension(filePath: string): boolean {
   const ext = path.extname(filePath).toLowerCase()
   return BINARY_EXTENSIONS.has(ext)
+}
+
+function sniffSupportedImageMime(bytes: Uint8Array): SupportedImageMime | undefined {
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return "image/png"
+  }
+  if (
+    bytes.length >= 3 &&
+    bytes[0] === 0xff &&
+    bytes[1] === 0xd8 &&
+    bytes[2] === 0xff
+  ) {
+    return "image/jpeg"
+  }
+  if (bytes.length >= 6) {
+    const signature = Buffer.from(bytes.subarray(0, 6)).toString("ascii")
+    if (signature === "GIF87a" || signature === "GIF89a") return "image/gif"
+  }
+  if (
+    bytes.length >= 12 &&
+    Buffer.from(bytes.subarray(0, 4)).toString("ascii") === "RIFF" &&
+    Buffer.from(bytes.subarray(8, 12)).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp"
+  }
+  return undefined
+}
+
+async function inspectRemoteImage(
+  sshPool: SSHPool,
+  remotePath: string,
+  signal: AbortSignal
+): Promise<{ mime?: SupportedImageMime; size: bigint }> {
+  const quotedPath = quoteShell(remotePath)
+  const result = await sshPool.exec(
+    [
+      `size=$(stat -c %s -- ${quotedPath}) || exit $?`,
+      `printf '%s\\n' "$size"`,
+      `dd bs=${IMAGE_PROBE_BYTES} count=1 if=${quotedPath} 2>/dev/null | od -An -v -tx1 2>/dev/null || :`,
+    ].join("; "),
+    { timeout: 10_000, signal }
+  )
+  if (result.exitCode !== 0) {
+    throw new Error(`Failed to inspect remote file ${remotePath}: ${result.stderr}`)
+  }
+
+  const [sizeText = "", ...headerLines] = result.stdout.split("\n")
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(sizeText)) {
+    throw new Error(`Failed to inspect remote file ${remotePath}: invalid size response`)
+  }
+  const headerText = headerLines.join(" ").trim()
+  const octets = headerText === "" ? [] : headerText.split(/\s+/u)
+  if (octets.some((octet) => !/^[0-9a-f]{2}$/iu.test(octet))) {
+    throw new Error(`Failed to inspect remote file ${remotePath}: invalid header response`)
+  }
+  const header = Buffer.from(octets.map((octet) => Number.parseInt(octet, 16)))
+  return {
+    mime: sniffSupportedImageMime(header),
+    size: BigInt(sizeText),
+  }
 }
 
 async function checkRemoteBinary(
@@ -67,7 +148,7 @@ export function createReadTool(
   pathResolver: RemotePathResolver
 ): ToolDefinition {
   return tool({
-    description: `Read the contents of a file or list a directory on the remote machine.`,
+    description: `Read the contents of a file or list a directory on the remote machine. PNG, JPEG, GIF, and WebP files are returned as image attachments.`,
     args: {
       filePath: tool.schema.string().describe("The absolute path to the file or directory to read"),
       offset: tool.schema.number().optional().describe("The line number to start reading from (1-indexed)"),
@@ -153,19 +234,88 @@ export function createReadTool(
         throw new Error(`File not found: ${remotePath}`)
       }
 
-      // For files: check binary on remote BEFORE syncing
+      await pathResolver.revalidateExisting(remotePath, ctx.abort)
+      const imageProbe = await inspectRemoteImage(sshPool, remotePath, ctx.abort)
+      await pathResolver.revalidateExisting(remotePath, ctx.abort)
+      if (imageProbe.mime !== undefined) {
+        const expectedMime = imageProbe.mime
+        if (imageProbe.size > BigInt(MAX_IMAGE_BYTES)) {
+          throw new Error(
+            `Cannot read image file: ${remotePath}\n\nImage exceeds the ${MAX_IMAGE_BYTES / 1024 / 1024} MiB limit.`
+          )
+        }
+
+        return syncEngine.transaction(async (transaction) => {
+          await pathResolver.revalidateExisting(remotePath, ctx.abort)
+          try {
+            if (!(await transaction.pull(remotePath, ctx.abort, MAX_IMAGE_BYTES))) {
+              throw new Error(`File not found: ${remotePath}`)
+            }
+          } catch (error) {
+            if (error instanceof RemoteFileSizeLimitError) {
+              throw new Error(
+                `Cannot read image file: ${remotePath}\n\nImage exceeds the ${MAX_IMAGE_BYTES / 1024 / 1024} MiB limit after download.`,
+                { cause: error }
+              )
+            }
+            throw error
+          }
+
+          const bytes = await fs.readFile(localPath)
+          if (bytes.byteLength > MAX_IMAGE_BYTES) {
+            throw new Error(
+              `Cannot read image file: ${remotePath}\n\nImage exceeds the ${MAX_IMAGE_BYTES / 1024 / 1024} MiB limit after download.`
+            )
+          }
+          if (BigInt(bytes.byteLength) !== imageProbe.size) {
+            throw new Error(`Cannot read image file: ${remotePath}\n\nFile changed during download.`)
+          }
+
+          const downloadedMime = sniffSupportedImageMime(bytes)
+          if (downloadedMime !== expectedMime) {
+            throw new Error(`Cannot read image file: ${remotePath}\n\nFile type changed during download.`)
+          }
+
+          await pathResolver.revalidateExisting(remotePath, ctx.abort)
+          const finalProbe = await inspectRemoteImage(sshPool, remotePath, ctx.abort)
+          if (
+            finalProbe.size !== BigInt(bytes.byteLength) ||
+            finalProbe.mime !== downloadedMime
+          ) {
+            throw new Error(`Cannot read image file: ${remotePath}\n\nRemote file changed during download.`)
+          }
+
+          const message = "Image read successfully"
+          return {
+            title: remotePath,
+            output: message,
+            metadata: { preview: message, truncated: false },
+            attachments: [
+              {
+                type: "file",
+                mime: downloadedMime,
+                url: `data:${downloadedMime};base64,${bytes.toString("base64")}`,
+              },
+            ],
+          }
+        }, ctx.abort)
+      }
+
+      // For other files: check binary on remote BEFORE syncing
       const binaryCheck = await checkRemoteBinary(sshPool, remotePath, ctx.abort)
       if (binaryCheck.isBinary) {
         throw new Error(
-          `Cannot read binary file: ${remotePath}\n\nReason: ${binaryCheck.reason}. Use bash tools to inspect it if needed.`
+          `Cannot read binary file: ${remotePath}\n\nReason: ${binaryCheck.reason}. Only PNG, JPEG, GIF, and WebP images can be attached.`
         )
       }
 
       return syncEngine.transaction(async (transaction) => {
+        await pathResolver.revalidateExisting(remotePath, ctx.abort)
         // Safe to sync: it's a text file
         if (!(await transaction.pull(remotePath, ctx.abort))) {
           throw new Error(`File not found: ${remotePath}`)
         }
+        await pathResolver.revalidateExisting(remotePath, ctx.abort)
 
         const buf = await fs.readFile(localPath)
         // ignoreBOM: true preserves the BOM as a regular character in the output

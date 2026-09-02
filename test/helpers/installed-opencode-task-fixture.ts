@@ -90,6 +90,10 @@ export interface InstalledOpenCodeConfigOverride {
   readonly subagent_depth?: number
   readonly agent?: Readonly<Record<string, Readonly<Record<string, unknown>>>>
   readonly permission?: Readonly<Record<string, unknown>>
+  readonly modelCapabilities?: {
+    readonly attachment?: boolean
+    readonly inputModalities?: readonly string[]
+  }
 }
 
 export interface TaskFixtureSshResponse {
@@ -661,13 +665,16 @@ function providerConfig(
         models: {
           [TASK_FIXTURE_MODEL_ID]: {
             name: "Hermetic Task Model",
-            attachment: false,
+            attachment: override?.modelCapabilities?.attachment ?? false,
             reasoning: false,
             temperature: false,
             tool_call: true,
             cost: { input: 0, output: 0 },
             limit: { context: 100_000, output: 4_096 },
-            modalities: { input: ["text"], output: ["text"] },
+            modalities: {
+              input: override?.modelCapabilities?.inputModalities ?? ["text"],
+              output: ["text"],
+            },
           },
         },
       },

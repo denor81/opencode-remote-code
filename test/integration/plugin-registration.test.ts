@@ -364,6 +364,88 @@ describe("server plugin registration", () => {
     }
   })
 
+  it("preserves remote image attachments through preflight and lifecycle guards", async () => {
+    const fixture = await createPluginFixture()
+    const fakeRemoteRoot = await mkdtemp(path.join(os.tmpdir(), "ocssh-plugin-remote-"))
+    temporaryRoots.push(fakeRemoteRoot)
+    const remotePath = `${fixture.remoteWorkdir}/pixel.png`
+    const remoteFile = path.join(
+      fakeRemoteRoot,
+      ...remotePath.split("/").filter(Boolean)
+    )
+    const sftpInputLog = path.join(fakeRemoteRoot, "sftp-input.jsonl")
+    const pngBytes = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64"
+    )
+    await mkdir(path.dirname(remoteFile), { recursive: true })
+    await writeFile(remoteFile, pngBytes)
+    process.env.FAKE_REMOTE_ROOT = fakeRemoteRoot
+    process.env.FAKE_SFTP_INPUT_LOG = sftpInputLog
+
+    const responses = JSON.parse(process.env.FAKE_SSH_RESPONSES!) as Array<{
+      input: string
+      stdout?: string
+      exitCode?: number
+    }>
+    const octets = Array.from(pngBytes.subarray(0, 12), (byte) =>
+      byte.toString(16).padStart(2, "0")
+    )
+    responses.push(
+      { input: `realpath -e -- '${remotePath}'`, stdout: `${remotePath}\n` },
+      {
+        input: `if [ -d '${remotePath}' ]; then echo "DIR"; elif [ -f '${remotePath}' ]; then echo "FILE"; else echo "MISSING"; fi`,
+        stdout: "FILE\n",
+      },
+      {
+        input: `size=$(stat -c %s -- '${remotePath}') || exit $?; printf '%s\\n' "$size"; dd bs=12 count=1 if='${remotePath}' 2>/dev/null | od -An -v -tx1 2>/dev/null || :`,
+        stdout: `${pngBytes.byteLength}\n${octets.join(" ")}\n`,
+      },
+      { input: `stat -c %a '${remotePath}' 2>/dev/null`, stdout: "600\n" }
+    )
+    process.env.FAKE_SSH_RESPONSES = JSON.stringify(responses)
+
+    let hooks: Hooks | undefined
+    try {
+      hooks = await RemoteCodePlugin.server(
+        pluginInput(vi.fn(async () => ({ data: { id: "session", permission: [] } }))),
+        pluginOptions(fixture)
+      )
+      await hooks.config?.({
+        permission: { remote_status: "allow", read: "allow" },
+      } as never)
+      const ask = vi.fn<ToolContext["ask"]>(async () => undefined)
+      await completePluginPreflight(hooks.tool!, ask, "session", "build")
+
+      const value = await hooks.tool!.read.execute(
+        { filePath: remotePath },
+        toolContext(ask)
+      )
+      if (typeof value === "string") throw new Error("Expected a structured tool result")
+
+      expect(value).toEqual({
+        title: remotePath,
+        output: "Image read successfully",
+        metadata: { preview: "Image read successfully", truncated: false },
+        attachments: [
+          {
+            type: "file",
+            mime: "image/png",
+            url: `data:image/png;base64,${pngBytes.toString("base64")}`,
+          },
+        ],
+      })
+      expect(ask).toHaveBeenCalledWith(
+        expect.objectContaining({ permission: "read", patterns: ["pixel.png"] })
+      )
+      const sftpInputs = parseJsonLines<string>(await readFile(sftpInputLog, "utf8"))
+      expect(sftpInputs).toHaveLength(1)
+      expect(sftpInputs[0].startsWith("get /srv/plugin\\ workspace/pixel.png ")).toBe(true)
+    } finally {
+      await hooks?.dispose?.()
+    }
+  })
+
   it("closes the SSH pool before permission-held Bash can start a command", async () => {
     const fixture = await createPluginFixture()
     const askStarted = deferred()

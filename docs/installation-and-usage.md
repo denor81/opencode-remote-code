@@ -922,6 +922,31 @@ requests may leave the machine according to provider configuration. Task is
 intentionally not an SSH-backed tool. OpenCode SSH is not a sandbox or
 no-egress boundary.
 
+### Remote Image Reads
+
+The SSH-backed `read` tool returns PNG, JPEG, GIF, and WebP files as OpenCode
+image attachments after the same preflight, canonical path, external-directory,
+and `read` permission checks used for text. Detection uses file signatures, not
+trusted extensions. Extensionless supported images therefore work, while a
+misleading `.png` name does not turn arbitrary content into an attachment. SVG,
+PDF, BMP, and every other binary format remain unsupported.
+
+The encoded remote file is limited to 3 MiB. `read` checks the canonical path,
+remote size, and first signature bytes before SFTP. It checks the SFTP temporary
+size before loading that file into memory, then repeats canonical-path, size, and
+signature checks before returning a base64 data URL. An observed mismatch is
+rejected. These pathname checks cannot detect every transient same-path
+replacement by a non-cooperating writer. SFTP itself has no transfer-byte
+limiter, so rejection does not undo bytes already transferred or temporary disk
+space already used. The package does not inspect image dimensions or promise a
+bound on decoded image memory.
+
+Base64 image data is returned only in the attachment, not in ordinary tool text,
+metadata previews, or structured JSONL diagnostics. OpenCode can persist the
+attachment in its local session database and can send it to the configured model
+provider when the selected model supports image input. Normal launcher cleanup
+removes the private mirror, not OpenCode session data or provider-side retention.
+
 Same-process plugins, direct SDK/session API callers, and same-UID local
 processes are trusted. They can inspect launch data or bypass package tools and
 package-observed Task hooks; hostile trusted plugins are not sandboxed. Provider

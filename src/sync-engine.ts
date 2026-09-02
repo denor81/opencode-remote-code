@@ -47,7 +47,7 @@ interface OwnedRemoteLock {
 }
 
 export interface SyncTransaction {
-  pull(remotePath: string, signal?: AbortSignal): Promise<boolean>
+  pull(remotePath: string, signal?: AbortSignal, maxBytes?: number): Promise<boolean>
   push(remotePath: string, signal?: AbortSignal): Promise<void>
   pushMany(remotePaths: readonly string[], signal?: AbortSignal): Promise<void>
 }
@@ -69,6 +69,22 @@ export class RemoteFileConflict extends Error {
     this.remotePath = remotePath
     this.expectedExists = expectedExists
     this.actualExists = actualExists
+  }
+}
+
+export class RemoteFileSizeLimitError extends Error {
+  readonly code = "REMOTE_FILE_SIZE_LIMIT"
+
+  constructor(
+    readonly remotePath: string,
+    readonly maxBytes: number,
+    readonly actualBytes: number
+  ) {
+    super(
+      `Remote file exceeds the ${maxBytes}-byte download limit: ${remotePath} ` +
+        `(downloaded ${actualBytes} bytes)`
+    )
+    this.name = "RemoteFileSizeLimitError"
   }
 }
 
@@ -201,8 +217,8 @@ export class SyncEngine {
     return this.withLock(async () => {
       await this.revalidateMutationPaths(mutationPaths, signal)
       return operation({
-        pull: (remotePath, operationSignal) =>
-          this.pullUnlocked(remotePath, operationSignal),
+        pull: (remotePath, operationSignal, maxBytes) =>
+          this.pullUnlocked(remotePath, operationSignal, maxBytes),
         push: (remotePath, operationSignal) =>
           this.pushManyUnlocked([remotePath], mutationPaths, operationSignal),
         pushMany: (remotePaths, operationSignal) =>
@@ -212,9 +228,13 @@ export class SyncEngine {
   }
 
   /** Register and download one remote file, recording its conflict baseline. */
-  async pull(remotePath: string, signal?: AbortSignal): Promise<boolean> {
+  async pull(
+    remotePath: string,
+    signal?: AbortSignal,
+    maxBytes?: number
+  ): Promise<boolean> {
     return this.transaction(
-      (transaction) => transaction.pull(remotePath, signal),
+      (transaction) => transaction.pull(remotePath, signal, maxBytes),
       signal
     )
   }
@@ -247,8 +267,15 @@ export class SyncEngine {
 
   private async pullUnlocked(
     remotePath: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    maxBytes?: number
   ): Promise<boolean> {
+    if (
+      maxBytes !== undefined &&
+      (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
+    ) {
+      throw new TypeError("Remote download byte limit must be a non-negative safe integer")
+    }
     const normalized = this.normalizeRemotePath(remotePath)
     await this.registerUnlocked(normalized)
     this.baselines.delete(normalized)
@@ -274,6 +301,16 @@ export class SyncEngine {
         return false
       }
 
+      if (maxBytes !== undefined) {
+        const downloadedSize = (await fs.stat(tempPath)).size
+        if (downloadedSize > maxBytes) {
+          throw new RemoteFileSizeLimitError(
+            normalized,
+            maxBytes,
+            downloadedSize
+          )
+        }
+      }
       const content = await fs.readFile(tempPath)
       const mode = await this.readRemoteMode(normalized, signal)
       await fs.rename(tempPath, localPath)

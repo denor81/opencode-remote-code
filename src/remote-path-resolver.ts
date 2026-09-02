@@ -25,7 +25,7 @@ export class RemotePathChangedError extends Error {
     options?: ErrorOptions
   ) {
     super(
-      `Remote mutation path changed after authorization: expected ${expectedPath}, found ${
+      `Remote path changed after authorization: expected ${expectedPath}, found ${
         actualPath ?? "no resolvable target or parent"
       }`,
       options
@@ -57,6 +57,13 @@ export class RemotePathResolver {
       await requestExternalDirectory(ctx, this.remoteRoot, canonical)
     }
     return canonical
+  }
+
+  async revalidateExisting(remotePath: string, signal: AbortSignal): Promise<void> {
+    const actual = await this.tryRealpath(remotePath, signal)
+    if (actual !== remotePath) {
+      throw new RemotePathChangedError(remotePath, actual)
+    }
   }
 
   async resolveMutation(

@@ -326,6 +326,29 @@ The plugin overrides these familiar OpenCode tools:
 Task is intentionally absent from this table because it is local OpenCode
 orchestration, not an SSH-backed project tool.
 
+### Image Reads
+
+After the normal preflight, path checks, and `read` permission, remote `read`
+returns PNG, JPEG, GIF, and WebP files as OpenCode image attachments. The format
+is identified from file signatures rather than trusted extensions, so an
+extensionless image works and a misleading image extension is not enough. SVG,
+PDF, BMP, and other binary formats remain unsupported.
+
+An image may be at most 3 MiB. The package checks the reported remote size,
+canonical path, and header before SFTP, bounds the file before loading it from
+the SFTP temporary into memory, then repeats path, size, and signature checks
+before constructing the attachment. An observed mismatch is rejected. These
+pathname checks cannot detect every transient same-path replacement by a
+non-cooperating writer, and the limit is not a hard bound on bytes already
+transferred or temporarily held by the mirror. Image dimensions and decoded
+memory are not bounded by this package.
+
+The base64 payload is carried in the attachment rather than ordinary tool output
+or structured diagnostics. OpenCode may persist that attachment in local session
+state and send it to the configured model provider when the selected model
+supports images. Removing the launch mirror does not remove OpenCode session or
+provider-side data.
+
 Other tools, plugins, MCP servers, LSPs, formatters, provider clients, and TUI
 internals execute from the local OpenCode environment. Provider requests may
 leave the machine according to provider configuration. This package is not a

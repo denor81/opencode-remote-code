@@ -315,6 +315,20 @@ Never treat truncated output as proof that text is absent or that a file or
 result was read completely. Avoid replacing a bounded file operation with an
 uncontrolled shell read of a large or special file.
 
+Package `read` can attach PNG, JPEG, GIF, and WebP files up to 3 MiB after
+content-signature and post-download validation. Use `read` directly when visual
+inspection of a supported remote image is required; do not replace it with
+base64 or an uncontrolled binary shell read. SVG, PDF, BMP, and other binary
+formats are not image attachments. Canonical-path rechecks reject observed path
+changes but cannot detect every transient same-path replacement by a
+non-cooperating writer. A rejected image may already have consumed SFTP transfer
+and temporary mirror resources if a concurrent writer enlarged it.
+
+An image attachment can be persisted in local OpenCode session state and sent to
+the configured model provider. Treat approving an image read as approving that
+content for the active OpenCode/provider workflow; launcher mirror cleanup does
+not erase session or provider retention.
+
 ## 5. Timeouts And Uncertain Results
 
 A timeout or cancellation closes the local SSH channel, but the remote process

@@ -299,6 +299,17 @@ remain and must be inspected. Remote project instructions are not automatically
 ingested, so a root `AGENTS.md` reaches the host/model only if a preflighted
 session explicitly reads or otherwise transmits it.
 
+After `read` permission, PNG, JPEG, GIF, and WebP files whose reported encoded
+size is at most 3 MiB can be returned as base64 OpenCode attachments. The package
+checks content signatures and size before and after SFTP, but SFTP has no hard
+transfer-byte limit. Canonical-path rechecks reject an observed symlink/path
+change but cannot detect every transient replacement by a non-cooperating
+writer. The package does not bound decoded image dimensions or memory. OpenCode
+may retain an attachment in its session database and send it to the configured
+image-capable model provider. Mirror cleanup does not erase that session data or
+provider-side retention. Unsupported binary formats remain rejected and binary
+payloads are not written to structured JSONL diagnostics.
+
 ## Startup Diagnostics
 
 ### Structured JSONL

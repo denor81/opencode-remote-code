@@ -88,6 +88,30 @@ describe("RemotePathResolver", () => {
     expect(ask).not.toHaveBeenCalled()
   })
 
+  it("rejects an existing canonical path that becomes a symlink", async () => {
+    let realpathCalls = 0
+    const pool = new FakePool((command) => {
+      expect(command).toBe("realpath -e -- /workspace/image.png")
+      realpathCalls++
+      return commandResult(
+        realpathCalls === 1 ? "/workspace/image.png\n" : "/outside/image.png\n"
+      )
+    })
+    const resolver = new RemotePathResolver("/workspace", pool)
+    const signal = new AbortController().signal
+
+    expect(await resolver.resolveExisting("image.png", toolContext(async () => {}))).toBe(
+      "/workspace/image.png"
+    )
+    await expect(
+      resolver.revalidateExisting("/workspace/image.png", signal)
+    ).rejects.toMatchObject({
+      code: "REMOTE_PATH_CHANGED",
+      expectedPath: "/workspace/image.png",
+      actualPath: "/outside/image.png",
+    })
+  })
+
   it("authorizes both lexical and different canonical external paths", async () => {
     const events: string[] = []
     const pool = new FakePool((command) => {

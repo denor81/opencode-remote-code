@@ -36,6 +36,7 @@ import {
 import {
   RemoteFileConflict,
   RemoteFileLockError,
+  RemoteFileSizeLimitError,
   SyncEngine,
   type SyncTransaction,
 } from "../../src/sync-engine.js"
@@ -204,6 +205,25 @@ describe("SyncEngine", () => {
     expect(pool.uploads[0]).toMatch(/^\/workspace\/\.b\.txt\.opencode-[a-f0-9]+\.tmp$/)
     expect(pool.uploads[0]).not.toContain("a.txt")
     expect((await pool.statRemote("/workspace/b.txt")).mode & 0o777).toBe(0o640)
+  })
+
+  it("rejects a bounded pull before moving oversized content into the mirror", async () => {
+    const remotePath = "/workspace/oversized.bin"
+    const pool = await createRemotePool()
+    await pool.writeRemote(remotePath, Buffer.alloc(17))
+    const fixture = await createEngine(pool)
+
+    await expect(
+      fixture.engine.pull(remotePath, new AbortController().signal, 16)
+    ).rejects.toMatchObject({
+      code: "REMOTE_FILE_SIZE_LIMIT",
+      remotePath,
+      maxBytes: 16,
+      actualBytes: 17,
+    } satisfies Partial<RemoteFileSizeLimitError>)
+
+    await expect(stat(fixture.mapper.toLocal(remotePath))).rejects.toThrow()
+    expect(pool.downloads).toEqual([remotePath])
   })
 
   it("fresh write pulls existing content before its diff and preserves its BOM", async () => {
@@ -1459,6 +1479,24 @@ class FakeRemotePool implements SSHPool {
         return commandResult(info.isDirectory() ? "DIR\n" : "FILE\n")
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return commandResult("MISSING\n")
+        throw error
+      }
+    }
+
+    const imageProbeMatch = command.match(
+      /^size=\$\(stat -c %s -- (\S+)\) \|\| exit \$\?; printf '%s\\n' "\$size"; dd bs=12 count=1 if=\1 2>\/dev\/null \| od -An -v -tx1 2>\/dev\/null \|\| :$/
+    )
+    if (imageProbeMatch) {
+      try {
+        const content = await readFile(this.localRemotePath(imageProbeMatch[1]))
+        const octets = Array.from(content.subarray(0, 12), (byte) =>
+          byte.toString(16).padStart(2, "0")
+        )
+        return commandResult(`${content.byteLength}\n${octets.join(" ")}\n`)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          return commandResult("", "stat: No such file or directory\n", 1)
+        }
         throw error
       }
     }
