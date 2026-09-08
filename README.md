@@ -4,22 +4,25 @@ Run OpenCode and its TUI locally while the normal project tools operate on a
 remote machine through system OpenSSH. The remote host needs no OpenCode,
 Node.js, plugin, or agent installation.
 
-Tested against OpenCode 1.18.18. Before every SSH connection, the launcher asks
-the installed OpenCode to load this server plugin in an isolated local check and
-requires its reported version to match nonce-bound loader runtime evidence.
-Callable session lookup is mandatory for every launch. Safe same-launch Task
-resume is package-controlled and enabled for every identified OpenCode version
-that passes the selected/loader/runtime version checks and exposes callable
-session lookup. The package's ownership and admission guards fail closed if a
-later runtime exposes missing, malformed, or mismatched Task/session evidence
-through the expected hooks. OpenCode itself remains part of the trusted
-computing base; startup does not behaviorally attest Task.
+**Automatic compatibility checks on every launch.** Before opening an SSH
+connection, OpenCode SSH runs an isolated local check against your installed
+OpenCode to verify plugin loading, required session API availability, and
+matching version information. The plugin also rechecks runtime compatibility
+during initialization.
 
-Final 2026-08-28 evidence includes the exact 1.18.18 six-scenario resume gate,
-the installed permission-engine scenario, and installed real-Task fake-SFTP
-mutation. Formal direct-child release remains incomplete only for real-SSH
-two-sibling mutation and real permission-UI and direct-child TUI behavior. The
-real-SSH suite was not run.
+Compatibility is checked against the installed version, not a fixed version
+allowlist. Failed startup checks block launch; versions other than the regression
+baseline produce an advisory warning when the checks pass. This helps catch
+integration problems early and makes startup failures easier to diagnose.
+
+These focused checks do not replace full end-to-end testing. For additional
+verification inside a running OpenCode terminal, use the
+[ready-to-run agent self-test prompt](opencode-ssh-remote-use/opencode-ssh-agent-self-test.md)
+and the [manual TUI checks](docs/installation-and-usage.md#manual-tui-checks).
+The agent self-test is opt-in and creates and removes its own temporary test
+directory inside the current remote workdir without modifying existing project
+files. See [compatibility details](docs/installation-and-usage.md#automatic-compatibility-preflight)
+for the exact startup checks and their limitations.
 
 ```bash
 opencode-ssh staging /srv/app
@@ -33,7 +36,7 @@ responsible for `~/.ssh/config`, keys, `ssh-agent`, host verification,
 ## Requirements
 
 - Node.js 22.22.2 or newer.
-- OpenCode installed locally. Version 1.18.18 is the tested baseline.
+- OpenCode installed locally; it must pass the automatic startup compatibility checks.
 - A POSIX local host. Current release evidence is Linux x86_64; macOS is an
   intended local platform but is not part of the recorded hardening evidence.
   Windows users should run the launcher in WSL rather than native Windows.
@@ -623,6 +626,12 @@ Structured JSONL records only bounded byte counts, status/truncation fields, and
 correlation for the raw capture; it stores neither raw bytes nor the raw path.
 
 ## Testing
+
+Final 2026-08-28 evidence includes the exact 1.18.18 six-scenario resume gate,
+the installed permission-engine scenario, and installed real-Task fake-SFTP
+mutation. Formal direct-child release remains incomplete only for real-SSH
+two-sibling mutation and real permission-UI and direct-child TUI behavior. The
+real-SSH suite was not run.
 
 ```bash
 npm run lint

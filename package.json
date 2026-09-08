@@ -1,7 +1,7 @@
 {
   "name": "opencode-ssh",
   "version": "0.1.0",
-  "description": "Run OpenCode locally while project tools operate through system OpenSSH; tested against OpenCode 1.18.18",
+  "description": "Run OpenCode locally with SSH-backed remote project tools and automatic per-launch compatibility checks.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

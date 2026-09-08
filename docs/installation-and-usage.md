@@ -5,19 +5,23 @@ project tools operate on a remote machine through system OpenSSH. The remote
 machine needs only an SSH server and the standard utilities listed below; it
 does not need Node.js, OpenCode, this package, or another agent runtime.
 
-OpenCode SSH is tested against OpenCode 1.18.18. Other OpenCode versions are
-allowed only after the installed OpenCode loads this package's server plugin in
-an isolated preflight. A different version still requires the manual TUI checks
-in this guide. Callable session lookup and matching selected, loader, and
-production runtime versions are required for every launch; every identified
-version passing those checks receives package-controlled same-launch resume.
-Version is diagnostic and baseline evidence, not a runtime allowlist.
+**Automatic compatibility checks run on every launch.** Before opening an SSH
+connection, the launcher checks the installed OpenCode in an isolated local
+preflight for plugin loading, required session API availability, and matching
+version information. The plugin rechecks runtime compatibility during
+initialization. Compatibility is checked against the installed version, not a
+fixed version allowlist: failed startup checks block launch, while a version
+other than the regression baseline produces an advisory warning when the checks
+pass.
 
-Final 2026-08-28 evidence passed the exact six-scenario 1.18.18 Task portion and
-one permission-engine scenario, making the complete exact baseline 7/7, plus
-installed real-Task fake-SFTP mutation. Formal direct-child release remains
-incomplete only for real-SSH two-sibling mutation and real permission UI and
-direct-child TUI behavior. The real-SSH suite was not run.
+These focused startup checks help detect integration problems early; they do
+not replace full end-to-end testing. See the
+[automatic compatibility preflight](#automatic-compatibility-preflight) for
+details. For additional verification inside a running OpenCode terminal, use the
+[ready-to-run agent self-test prompt](../opencode-ssh-remote-use/opencode-ssh-agent-self-test.md)
+and the [manual TUI checks](#manual-tui-checks). The agent self-test is opt-in and
+creates and removes its own temporary test directory inside the current remote
+workdir without modifying existing project files.
 
 ## Requirements
 
@@ -1045,6 +1049,12 @@ renewed preflight, and fake-SFTP mutation. The complete `npm test` gate passed 3
 unit/integration files and 480/480 tests, then smoke passed 2/2;
 `npm pack --dry-run` listed 170 files, and the actual 1.18.25 self-test reported
 Task resume enabled.
+
+Final 2026-08-28 evidence passed the exact six-scenario 1.18.18 Task portion and
+one permission-engine scenario, making the complete exact baseline 7/7, plus
+installed real-Task fake-SFTP mutation. Formal direct-child release remains
+incomplete only for real-SSH two-sibling mutation and real permission UI and
+direct-child TUI behavior. The real-SSH suite was not run.
 
 Final verified 2026-08-28 evidence is:
 
