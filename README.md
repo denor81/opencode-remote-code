@@ -169,6 +169,12 @@ instructions. No copy, link, or remote project setup is required. Remote root
 preflight, a user or session may explicitly read it with the normal SSH-backed
 `read` tool and applicable OpenCode permissions.
 
+The launcher enables built-in hosted `websearch` by setting
+`OPENCODE_ENABLE_EXA=1` for the local OpenCode host on every launch, including
+when the inherited value is `0`. OpenCode's `websearch` permission rules still
+apply. Restart `opencode-ssh` after updating to apply this launch-time setting;
+see [built-in web search](docs/installation-and-usage.md#built-in-web-search).
+
 The remote workdir is the initial project root and stable session identity. It
 is not a chroot:
 

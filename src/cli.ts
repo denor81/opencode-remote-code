@@ -382,6 +382,7 @@ export async function runCli(
       ...env,
       PWD: paths.workspaceDir,
       OPENCODE_CONFIG_CONTENT: configContent,
+      OPENCODE_ENABLE_EXA: "1",
       OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS: "false",
       [REMOTE_ENV.alias]: parsed.alias,
       [REMOTE_ENV.workdir]: canonicalWorkdir,

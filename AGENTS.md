@@ -82,6 +82,7 @@
 - Activation requires the complete private launcher environment and matching plugin tuple `launchID`. Without it, the plugin is dormant.
 - Same-process plugins, direct SDK/session API callers, and same-UID local processes are trusted TCB members. A colliding enabled `mcp.remote` config is rejected; hostile trusted plugins, SDK calls that bypass package-observed Task hooks, and duplicate module instances are not sandboxed.
 - Global OpenCode config, provider environment, plugins, and MCP remain available. Caller-directory project config is not discovered because OpenCode starts in a stable target-specific local workspace.
+- Every production OpenCode host launch explicitly sets `OPENCODE_ENABLE_EXA=1`, overriding inherited values, to enable built-in hosted `websearch`. OpenCode's websearch permissions still govern use; searches execute from the local host. Restart the launcher after updating to apply the setting.
 - Stable session identity and logged `targetID` are based on the SHA-256 of alias plus canonical workdir. This is pseudonymous correlation, not secrecy against guessed inputs. Mirrors are launch-specific and removed during launcher cleanup.
 
 ## Permissions And Paths

@@ -926,6 +926,23 @@ requests may leave the machine according to provider configuration. Task is
 intentionally not an SSH-backed tool. OpenCode SSH is not a sandbox or
 no-egress boundary.
 
+### Built-in Web Search
+
+The launcher explicitly sets `OPENCODE_ENABLE_EXA=1` in the local OpenCode
+host's environment on every launch. This overrides an inherited `0` or `false`
+and makes the built-in hosted `websearch` tool available independently of the
+launching shell's configuration. In OpenCode 1.18.35, providers such as `openai`
+require a search-enabling flag in addition to permission to use `websearch`.
+
+OpenCode's global, per-agent, and session `websearch` permission rules continue
+to govern tool use. Web searches run from the local OpenCode host. No remote
+shell configuration is needed.
+
+After installing the updated launcher, exit and restart `opencode-ssh`. In a
+new session, ask OpenCode to use `websearch` to find the official Python website
+and provide its URL. Verify an actual `websearch` call in the tool history:
+the launcher environment check alone does not test the external search service.
+
 ### Remote Image Reads
 
 The SSH-backed `read` tool returns PNG, JPEG, GIF, and WebP files as OpenCode

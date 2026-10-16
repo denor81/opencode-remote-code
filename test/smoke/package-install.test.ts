@@ -121,7 +121,7 @@ describe("installed package", () => {
         await readFile(path.join(installedPackage, "package.json"), "utf8")
       ) as { bin: Record<string, string>; description: string; version: string }
       expect(installedManifest.bin).toEqual({ "opencode-ssh": "dist/cli.js" })
-      expect(installedManifest.description).toContain("tested against OpenCode 1.18.18")
+      expect(installedManifest.description).toBe(sourceManifest.description)
       const exportedEntry = await runCommand(
         process.execPath,
         [

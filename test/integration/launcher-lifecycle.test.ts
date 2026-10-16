@@ -95,7 +95,7 @@ describe("launcher lifecycle", () => {
     }
   })
 
-  it("launches OpenCode without forwarded args and cleans each launch-specific artifact", async () => {
+  it("launches OpenCode with hosted search and cleans each launch-specific artifact", async () => {
     const alias = "deploy-host.example"
     const requestedWorkdir = "/srv/link workspace"
     const canonicalWorkdir = "/srv/canonical workspace"
@@ -115,7 +115,9 @@ describe("launcher lifecycle", () => {
       UNRELATED_PROVIDER_SECRET: secret,
     })
 
+    // Both an absent shell flag and an inherited opt-out must enable hosted search.
     await expect(runCli([alias, requestedWorkdir], fixture.env)).resolves.toBe(23)
+    fixture.env.OPENCODE_ENABLE_EXA = "0"
     await expect(runCli([alias, requestedWorkdir], fixture.env)).resolves.toBe(23)
 
     const rawOpenCodeLog = await readFile(fixture.openCodeLog, "utf8")
@@ -150,6 +152,7 @@ describe("launcher lifecycle", () => {
         [REMOTE_ENV.sftpBinary]: fakeSftp,
         [REMOTE_ENV.expectedOpenCodeRuntimeVersion]: BASELINE_VERSION,
         [REMOTE_ENV.taskResumeCapability]: TASK_RESUME_PROTOCOL,
+        OPENCODE_ENABLE_EXA: "1",
         OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS: "false",
       })
       expect(invocation.env).not.toHaveProperty("UNRELATED_PROVIDER_SECRET")
@@ -1099,6 +1102,7 @@ async function createFixture(
   const controlledNames = [
     ...Object.values(REMOTE_ENV),
     "OPENCODE_CONFIG_CONTENT",
+    "OPENCODE_ENABLE_EXA",
     "OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS",
   ]
   for (const name of controlledNames) delete env[name]
